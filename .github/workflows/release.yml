@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build-installer:
+    name: Build Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Publish SmartPrinter.Agent
+        working-directory: services/desktop-agent/SmartPrinter.Agent
+        run: |
+          dotnet publish -c Release -r win-x64 --self-contained false -o ../../../apps/desktop-ui/agent-publish
+
+      - name: Sign agent executable
+        if: env.CSC_LINK != ''
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        shell: pwsh
+        run: |
+          # Requires the Windows SDK's signtool.exe to be on PATH (preinstalled on
+          # windows-latest GitHub runners as part of the Visual Studio toolchain).
+          $certPath = "$env:RUNNER_TEMP\cert.pfx"
+          [System.Convert]::FromBase64String($env:CSC_LINK) | Set-Content -Path $certPath -Encoding Byte
+          signtool sign /f $certPath /p $env:CSC_KEY_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 apps\desktop-ui\agent-publish\SmartPrinter.Agent.exe
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build and package Electron installer
+        working-directory: apps/desktop-ui
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: npm run package
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smartprinter-desktop-installer
+          path: dist-packages/**
+
+      # Publishing to your update feed (S3/Supabase Storage/CDN) is environment-specific -
+      # add a step here once you've chosen a host, e.g.:
+      #   - name: Publish to update feed
+      #     run: aws s3 sync dist-packages/ s3://your-bucket/desktop/stable/ --delete

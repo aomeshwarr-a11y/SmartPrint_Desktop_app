@@ -1,0 +1,43 @@
+appId: in.smartprinter.desktop
+productName: SmartPrinter Desktop
+copyright: Copyright © Zayvion Private Limited
+directories:
+  output: ../../dist-packages
+  buildResources: build
+
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # Code signing: set CSC_LINK / CSC_KEY_PASSWORD environment variables to your EV
+  # code-signing certificate (.pfx) and its password - electron-builder signs
+  # automatically when these are present. See docs/DEPLOYMENT.md and installer/README.md.
+  # Without a valid certificate, Windows SmartScreen will warn users on first run.
+  signingHashAlgorithms: ["sha256"]
+
+nsis:
+  oneClick: false
+  perMachine: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: SmartPrinter Desktop
+  # Runs after the Electron app installer finishes, to also install/start the
+  # SmartPrinter.Agent Windows Service - see installer/README.md for the full chain and
+  # installer/installer.nsi for the WiX/NSIS alternative that bundles both installers
+  # into a single package end to end.
+  include: ../../installer/nsis-service-hooks.nsh
+
+publish:
+  provider: generic
+  # Point this at the release CDN/bucket you control. electron-updater polls this URL
+  # for latest.yml + the new installer - see docs/RELEASE.md.
+  url: https://updates.smartprinter.in/desktop/
+
+extraMetadata:
+  main: dist-electron/main.js

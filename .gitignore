@@ -1,0 +1,38 @@
+# Node
+node_modules/
+dist/
+dist-electron/
+dist-packages/
+*.local
+.env
+apps/desktop-ui/.env
+
+# .NET
+services/desktop-agent/**/bin/
+services/desktop-agent/**/obj/
+services/desktop-agent/**/.data/
+*.user
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vs/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Test output
+services/desktop-agent/**/TestResults/
+
+# Local agent data (device credential, SQLite queue) - never commit this
+agent-publish/
+**/.data/
+device.credential
+agent.db
+agent.db-*

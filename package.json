@@ -1,0 +1,23 @@
+{
+  "name": "smartprinter-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SmartPrinter Windows Desktop Automation - Electron UI + C# background agent monorepo.",
+  "workspaces": [
+    "apps/desktop-ui",
+    "packages/shared-contracts"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/desktop-ui -- --host",
+    "dev:electron": "npm run dev:electron --workspace=apps/desktop-ui",
+    "build": "npm run build --workspace=packages/shared-contracts --if-present && npm run build --workspace=apps/desktop-ui",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspace=apps/desktop-ui"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "devDependencies": {
+    "electron": "^44.3.0"
+  }
+}

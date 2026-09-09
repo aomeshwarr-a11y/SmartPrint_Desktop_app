@@ -1,0 +1,119 @@
+import * as net from "node:net";
+import { randomUUID } from "node:crypto";
+
+/**
+ * Client-side half of the named pipe IPC protocol implemented in
+ * services/desktop-agent/SmartPrinter.Agent/Ipc/NamedPipeServer.cs. This runs in
+ * Electron's MAIN process (never the renderer) - the renderer only ever talks to this
+ * class through the secure preload bridge (see preload.ts), which is the standard
+ * "contextIsolation + no direct Node/net access from the page" Electron security model.
+ *
+ * Protocol: one JSON object per line, both directions. Requests carry a client-generated
+ * `id`; responses echo it back so concurrent calls can be matched even though the pipe is
+ * a single duplex byte stream per connection.
+ */
+
+const PIPE_NAME = process.platform === "win32" ? "\\\\.\\pipe\\SmartPrinterAgentPipe" : "/tmp/smartprinter-agent-dev.sock";
+
+interface PendingCall {
+  resolve: (value: any) => void;
+  reject: (reason: unknown) => void;
+  timeout: NodeJS.Timeout;
+}
+
+export class AgentPipeClient {
+  private socket: net.Socket | null = null;
+  private buffer = "";
+  private pending = new Map<string, PendingCall>();
+  private connecting: Promise<void> | null = null;
+  private reconnectDelayMs = 1000;
+
+  async call<TResponse = unknown>(command: string, payload?: unknown, timeoutMs = 15000): Promise<TResponse> {
+    await this.ensureConnected();
+
+    return new Promise<TResponse>((resolve, reject) => {
+      const id = randomUUID();
+      const timeout = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`IPC call '${command}' timed out after ${timeoutMs}ms - is SmartPrinter.Agent running?`));
+      }, timeoutMs);
+
+      this.pending.set(id, { resolve, reject, timeout });
+
+      const request = JSON.stringify({ id, command, payload }) + "\n";
+      this.socket!.write(request, (err) => {
+        if (err) {
+          clearTimeout(timeout);
+          this.pending.delete(id);
+          reject(err);
+        }
+      });
+    });
+  }
+
+  private ensureConnected(): Promise<void> {
+    if (this.socket && !this.socket.destroyed) {
+      return Promise.resolve();
+    }
+    if (this.connecting) {
+      return this.connecting;
+    }
+
+    this.connecting = new Promise<void>((resolve, reject) => {
+      const socket = net.createConnection(PIPE_NAME);
+      const onError = (err: Error) => {
+        this.connecting = null;
+        reject(new Error(`Could not connect to SmartPrinter.Agent named pipe (${PIPE_NAME}): ${err.message}`));
+      };
+
+      socket.once("error", onError);
+      socket.once("connect", () => {
+        socket.removeListener("error", onError);
+        socket.on("data", (chunk) => this.onData(chunk));
+        socket.on("close", () => this.onClose());
+        socket.on("error", (err) => this.onClose(err));
+        this.socket = socket;
+        this.connecting = null;
+        resolve();
+      });
+    });
+
+    return this.connecting;
+  }
+
+  private onData(chunk: Buffer) {
+    this.buffer += chunk.toString("utf8");
+    let newlineIndex: number;
+    while ((newlineIndex = this.buffer.indexOf("\n")) >= 0) {
+      const line = this.buffer.slice(0, newlineIndex);
+      this.buffer = this.buffer.slice(newlineIndex + 1);
+      if (!line.trim()) continue;
+
+      try {
+        const response = JSON.parse(line) as { id: string; success: boolean; data?: unknown; error?: string };
+        const pending = this.pending.get(response.id);
+        if (!pending) continue;
+        this.pending.delete(response.id);
+        clearTimeout(pending.timeout);
+        if (response.success) {
+          pending.resolve(response.data);
+        } else {
+          pending.reject(new Error(response.error ?? "Unknown agent error."));
+        }
+      } catch {
+        // Ignore malformed lines rather than crashing the whole IPC channel.
+      }
+    }
+  }
+
+  private onClose(err?: Error) {
+    this.socket = null;
+    for (const [, pending] of this.pending) {
+      clearTimeout(pending.timeout);
+      pending.reject(err ?? new Error("Connection to SmartPrinter.Agent was closed."));
+    }
+    this.pending.clear();
+  }
+}
+
+export const agentPipeClient = new AgentPipeClient();

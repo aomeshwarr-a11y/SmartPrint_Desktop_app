@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  agent:
+    name: Build & test SmartPrinter.Agent (C#)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        working-directory: services/desktop-agent
+        run: dotnet restore
+
+      - name: Build
+        working-directory: services/desktop-agent
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test
+        working-directory: services/desktop-agent
+        run: dotnet test --configuration Release --no-build --logger "trx;LogFileName=test-results.trx"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-test-results
+          path: services/desktop-agent/**/TestResults/**/*.trx
+
+  desktop-ui:
+    name: Build & typecheck desktop-ui (Electron/React)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build renderer + shared contracts
+        run: npm run build
+
+  supabase-lint:
+    name: Lint Supabase SQL and Edge Functions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Basic SQL syntax sanity check
+        run: |
+          for f in supabase/migrations/*.sql; do
+            echo "Checking $f"
+            grep -q ";" "$f" || (echo "No statements found in $f" && exit 1)
+          done
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
+
+      - name: Type-check Edge Functions
+        run: |
+          for dir in supabase/functions/*/; do
+            echo "Checking $dir"
+            deno check "$dir/index.ts" || exit 1
+          done
