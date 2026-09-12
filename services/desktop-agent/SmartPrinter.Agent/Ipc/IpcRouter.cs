@@ -22,6 +22,7 @@ public sealed class IpcRouter
     private readonly IPrinterService _printerService;
     private readonly DeviceAuthService _deviceAuth;
     private readonly JobProcessor _jobProcessor;
+    private readonly RealtimeJobListener _realtimeListener;
     private readonly AgentRuntimeState _state;
     private readonly ILogger<IpcRouter> _logger;
 
@@ -30,6 +31,7 @@ public sealed class IpcRouter
         IPrinterService printerService,
         DeviceAuthService deviceAuth,
         JobProcessor jobProcessor,
+        RealtimeJobListener realtimeListener,
         AgentRuntimeState state,
         ILogger<IpcRouter> logger)
     {
@@ -37,6 +39,7 @@ public sealed class IpcRouter
         _printerService = printerService;
         _deviceAuth = deviceAuth;
         _jobProcessor = jobProcessor;
+        _realtimeListener = realtimeListener;
         _state = state;
         _logger = logger;
     }
@@ -82,6 +85,7 @@ public sealed class IpcRouter
             IsPaired = _state.DeviceId.HasValue,
             DeviceId = _state.DeviceId?.ToString(),
             RealtimeConnected = _state.RealtimeConnected,
+            MockCloudMode = _state.MockCloudMode,
             AgentVersion = typeof(IpcRouter).Assembly.GetName().Version?.ToString() ?? "0.0.0",
             QueuedJobCount = queued.Count
         };
@@ -171,9 +175,21 @@ public sealed class IpcRouter
 
     private async Task<object> UnpairDeviceAsync(CancellationToken cancellationToken)
     {
+        _logger.LogInformation("UnpairDevice requested via IPC - stopping Realtime and clearing state");
+
+        // Stop Realtime FIRST, before clearing credentials, to prevent the reconnect
+        // loop from continuing with stale state.
+        if (_realtimeListener.IsRunning)
+        {
+            await _realtimeListener.StopAsync();
+        }
+
         await _deviceAuth.UnpairAsync(cancellationToken);
         _state.DeviceId = null;
         _state.ShopId = null;
+        _state.RealtimeConnected = false;
+
+        _logger.LogInformation("Device unpaired - Realtime stopped, credentials cleared, waiting for re-pairing");
         return new { unpaired = true };
     }
 
@@ -184,7 +200,7 @@ public sealed class IpcRouter
         // the Windows Service Recovery policy (configured by the installer, see
         // installer/README.md) is set to "Restart the Service" on a clean exit as well as
         // on failure, so this results in an actual restart without extra IPC surface.
-        _logger.LogInformation("Restart requested via IPC - exiting for Service Control Manager to restart the process");
+        _logger.LogInformation("Restart requested via IPC - exiting process for supervisor/SCM to restart");
         _ = Task.Run(async () =>
         {
             await Task.Delay(500);

@@ -18,6 +18,12 @@ namespace SmartPrinter.Agent.Cloud;
 ///     disconnected and the socket never got the event.
 ///   - De-duplication at the SQLite layer (see SqliteQueueRepository.TryEnqueueJobAsync)
 ///     so a redelivered event can never cause a second physical print.
+///
+/// Lifecycle contract:
+///   - StartAsync() begins exactly one connection loop for one device ID.
+///   - StopAsync() cancels the loop, unsubscribes the channel, and resets state.
+///   - A stopped listener will NOT reconnect. A new StartAsync() is required.
+///   - Only one connection loop may be active at a time.
 /// </summary>
 public sealed class RealtimeJobListener : IAsyncDisposable
 {
@@ -27,6 +33,8 @@ public sealed class RealtimeJobListener : IAsyncDisposable
     private RealtimeChannel? _channel;
     private CancellationTokenSource? _loopCts;
     private Func<CloudPrintJob, Task>? _onJobAssigned;
+    private Guid? _activeDeviceId;
+    private Task? _connectionLoopTask;
 
     public RealtimeJobListener(SupabaseGateway gateway, IOptions<AgentOptions> options, ILogger<RealtimeJobListener> logger)
     {
@@ -35,16 +43,85 @@ public sealed class RealtimeJobListener : IAsyncDisposable
         _logger = logger;
     }
 
+    /// <summary>
+    /// Whether a connection loop is currently active (started and not yet stopped/cancelled).
+    /// </summary>
+    public bool IsRunning => _connectionLoopTask != null && !_connectionLoopTask.IsCompleted;
+
     public async Task StartAsync(Guid deviceId, Func<CloudPrintJob, Task> onJobAssigned, CancellationToken cancellationToken)
     {
+        // Guard: if a loop is already running for a different device, stop it first.
+        if (IsRunning)
+        {
+            if (_activeDeviceId == deviceId)
+            {
+                _logger.LogWarning("Realtime listener is already running for device {DeviceId} - ignoring duplicate StartAsync", deviceId);
+                return;
+            }
+            _logger.LogWarning("Stopping existing Realtime listener for device {OldDeviceId} before starting for {NewDeviceId}",
+                _activeDeviceId, deviceId);
+            await StopAsync();
+        }
+
         _onJobAssigned = onJobAssigned;
+        _activeDeviceId = deviceId;
         _loopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        _logger.LogInformation("Realtime listener starting for device {DeviceId}", deviceId);
 
         // Always run one catch-up query immediately on start, before the socket is even
         // up, so jobs assigned while the agent was offline are never missed.
         await RunCatchUpAsync(deviceId, _loopCts.Token);
 
-        _ = ConnectionLoopAsync(deviceId, _loopCts.Token);
+        _connectionLoopTask = ConnectionLoopAsync(deviceId, _loopCts.Token);
+    }
+
+    /// <summary>
+    /// Stops the Realtime connection loop, unsubscribes the channel, and resets internal state.
+    /// After this call, no reconnect attempts will occur until StartAsync is called again.
+    /// </summary>
+    public async Task StopAsync()
+    {
+        var deviceId = _activeDeviceId;
+        _logger.LogInformation("Realtime listener stopping for device {DeviceId}", deviceId);
+
+        // Cancel the loop token first - this causes the ConnectionLoopAsync to exit.
+        if (_loopCts != null)
+        {
+            await _loopCts.CancelAsync();
+            _loopCts.Dispose();
+            _loopCts = null;
+        }
+
+        // Unsubscribe the channel.
+        UnsubscribeChannel();
+
+        // Wait for the connection loop task to finish (it should exit quickly after cancellation).
+        if (_connectionLoopTask != null)
+        {
+            try
+            {
+                await _connectionLoopTask.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            catch (TimeoutException)
+            {
+                _logger.LogWarning("Realtime connection loop did not exit within 5 seconds after cancellation");
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Realtime connection loop exited with an error during shutdown");
+            }
+            _connectionLoopTask = null;
+        }
+
+        _activeDeviceId = null;
+        _onJobAssigned = null;
+
+        _logger.LogInformation("Realtime listener stopped for device {DeviceId}", deviceId);
     }
 
     private async Task ConnectionLoopAsync(Guid deviceId, CancellationToken cancellationToken)
@@ -56,7 +133,19 @@ public sealed class RealtimeJobListener : IAsyncDisposable
         {
             try
             {
+                // Validate that this device ID is still the active one (guards against stale loops).
+                if (_activeDeviceId != deviceId)
+                {
+                    _logger.LogWarning("Realtime loop for device {DeviceId} detected device ID changed to {ActiveDeviceId} - exiting loop",
+                        deviceId, _activeDeviceId);
+                    break;
+                }
+
                 var client = await _gateway.GetClientAsync();
+
+                // Dispose the previous channel before creating a new one.
+                UnsubscribeChannel();
+
                 _channel = client.Realtime.Channel($"print_jobs_device_{deviceId}");
 
                 _channel.Register(
@@ -113,7 +202,7 @@ _channel.AddPostgresChangeHandler(
         }
     });
 
-                _channel.Subscribe();
+                await _channel.Subscribe();
                 _logger.LogInformation("Realtime subscription active for device {DeviceId}", deviceId);
 
                 // Re-run catch-up immediately after (re)connecting, in case events were
@@ -130,15 +219,28 @@ _channel.AddPostgresChangeHandler(
                     await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
                 }
 
-                _logger.LogWarning("Realtime channel disconnected for device {DeviceId} - will reconnect", deviceId);
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    _logger.LogInformation("Realtime loop cancelled for device {DeviceId} - stopping", deviceId);
+                    break;
+                }
+
+                _logger.LogWarning("Realtime channel disconnected for device {DeviceId} - will reconnect in {Backoff}s", deviceId, backoff.TotalSeconds);
             }
             catch (OperationCanceledException)
             {
+                _logger.LogInformation("Realtime loop cancelled for device {DeviceId} - stopping", deviceId);
                 break;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Realtime connection error - retrying in {Backoff}s", backoff.TotalSeconds);
+                _logger.LogError(ex, "Realtime connection error for device {DeviceId} - retrying in {Backoff}s", deviceId, backoff.TotalSeconds);
+            }
+
+            // Check cancellation before sleeping for backoff.
+            if (cancellationToken.IsCancellationRequested)
+            {
+                break;
             }
 
             try
@@ -151,6 +253,18 @@ _channel.AddPostgresChangeHandler(
             }
 
             backoff = TimeSpan.FromSeconds(Math.Min(backoff.TotalSeconds * 2, maxBackoff.TotalSeconds));
+        }
+
+        // Clean up channel on exit.
+        UnsubscribeChannel();
+    }
+
+    private void UnsubscribeChannel()
+    {
+        if (_channel != null)
+        {
+            try { _channel.Unsubscribe(); } catch { /* best effort */ }
+            _channel = null;
         }
     }
 
@@ -176,10 +290,6 @@ _channel.AddPostgresChangeHandler(
 
     public async ValueTask DisposeAsync()
     {
-        _loopCts?.Cancel();
-        if (_channel != null)
-        {
-            try { _channel.Unsubscribe(); } catch { /* best effort on shutdown */ }
-        }
+        await StopAsync();
     }
 }

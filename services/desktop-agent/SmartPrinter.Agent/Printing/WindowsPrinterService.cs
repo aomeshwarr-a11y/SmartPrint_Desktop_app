@@ -54,7 +54,7 @@ public sealed class WindowsPrinterService : IPrinterService
                 });
             });
 
-            _logger.LogInformation("Discovered {Count} Windows printers", results.Count);
+            _logger.LogDebug("Discovered {Count} Windows printers", results.Count);
             return (IReadOnlyList<PrinterInfo>)results;
         }, cancellationToken);
     }

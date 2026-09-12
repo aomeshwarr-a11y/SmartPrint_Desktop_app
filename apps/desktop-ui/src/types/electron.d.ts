@@ -1,4 +1,4 @@
-import type { IpcCommand, IpcResponse } from "@shared/index";
+import type { AgentRestartResult, IpcCommand } from "@shared/index";
 
 export {};
 
@@ -8,15 +8,10 @@ declare global {
       callAgent: <T = unknown>(
         command: IpcCommand,
         payload?: unknown
-      ) => Promise<IpcResponse<T>>;
+      ) => Promise<T>;
+      restartAgent?: () => Promise<AgentRestartResult>;
       openExternal?: (url: string) => Promise<void>;
-      onAgentEvent?: (
-        callback: (event: string, payload: unknown) => void
-      ) => () => void;
-      getAppVersion?: () => Promise<string>;
-      minimize?: () => Promise<void>;
-      maximize?: () => Promise<void>;
-      close?: () => Promise<void>;
+      onUpdateDownloaded?: (callback: () => void) => void;
     };
   }
 }

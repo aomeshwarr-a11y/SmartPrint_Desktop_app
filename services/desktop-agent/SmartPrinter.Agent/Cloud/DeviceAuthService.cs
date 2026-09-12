@@ -39,6 +39,61 @@ public sealed class DeviceAuthService
     public bool IsPaired => _cachedCredential != null;
 
     private DeviceCredential? _cachedCredential;
+    private TaskCompletionSource<bool> _pairingTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource<bool> _unpairTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly object _signalLock = new();
+
+    public void NotifyPairingCompleted()
+    {
+        lock (_signalLock)
+        {
+            _pairingTcs.TrySetResult(true);
+            _pairingTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    public async Task WaitForPairingAsync(CancellationToken cancellationToken)
+    {
+        Task task;
+        lock (_signalLock)
+        {
+            task = _pairingTcs.Task;
+        }
+        try
+        {
+            await task.WaitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected on service shutdown
+        }
+    }
+
+    public void NotifyUnpaired()
+    {
+        lock (_signalLock)
+        {
+            _unpairTcs.TrySetResult(true);
+            _unpairTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    public async Task WaitForUnpairAsync(CancellationToken cancellationToken)
+    {
+        Task task;
+        lock (_signalLock)
+        {
+            task = _unpairTcs.Task;
+        }
+        try
+        {
+            await task.WaitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected on service shutdown
+        }
+    }
 
     public async Task<DeviceCredential?> LoadStoredCredentialAsync(CancellationToken cancellationToken = default)
     {
@@ -79,6 +134,8 @@ public sealed class DeviceAuthService
         await _credentialStore.SaveAsync(credential, cancellationToken);
         _cachedCredential = credential;
 
+        NotifyPairingCompleted();
+
         _logger.LogInformation("Device paired successfully. DeviceId={DeviceId}", payload.device_id);
         return new PairingConfirmationResult(payload.device_id, payload.shop_id, payload.device_secret);
     }
@@ -102,14 +159,46 @@ public sealed class DeviceAuthService
             device_secret = _cachedCredential.DeviceSecret
         }, cancellationToken);
 
-        if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized || response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        if (!response.IsSuccessStatusCode)
         {
-            _logger.LogWarning("Device credential was rejected by backend (revoked?) - clearing local credential");
-            await UnpairAsync(cancellationToken);
-            throw new InvalidOperationException("Device credential revoked. Re-pairing is required.");
+            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            _logger.LogWarning("Token refresh failed: Status={StatusCode}, DeviceId={DeviceId}, Response={Response}",
+                (int)response.StatusCode, _cachedCredential.DeviceId, errorBody);
+
+            // ONLY unpair if the backend Edge Function definitively rejected the device/credential as revoked or non-existent
+            // (e.g. 401 "Invalid or revoked device credential.", or 403 "Device not found or not active.").
+            // Do NOT unpair on gateway errors (e.g. UNAUTHORIZED_NO_AUTH_HEADER), rate limits, 500s, or transient network issues.
+            bool isDefinitivelyRevoked = false;
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(errorBody);
+                if (doc.RootElement.TryGetProperty("error", out var errProp))
+                {
+                    var errMsg = errProp.GetString();
+                    if (errMsg != null && (
+                        errMsg.Contains("revoked", StringComparison.OrdinalIgnoreCase) ||
+                        errMsg.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
+                        errMsg.Contains("not active", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        isDefinitivelyRevoked = true;
+                    }
+                }
+            }
+            catch
+            {
+                // Not valid JSON from Edge Function; treat as non-revocation error
+            }
+
+            if (isDefinitivelyRevoked)
+            {
+                _logger.LogWarning("Device credential was definitively rejected by backend ({ErrorBody}) - clearing local credential", errorBody);
+                await UnpairAsync(cancellationToken);
+                throw new InvalidOperationException($"Device credential revoked. Re-pairing is required. (Backend error: {errorBody})");
+            }
+
+            throw new InvalidOperationException($"Failed to refresh device token (Status {(int)response.StatusCode}): {errorBody}");
         }
 
-        response.EnsureSuccessStatusCode();
         var payload = await response.Content.ReadFromJsonAsync<TokenRefreshResponse>(cancellationToken: cancellationToken)
                       ?? throw new InvalidOperationException("Empty response from device-token-refresh.");
         return payload.access_token;
@@ -122,11 +211,21 @@ public sealed class DeviceAuthService
             try
             {
                 var http = BuildFunctionsClient(null);
-                await http.PostAsJsonAsync("device-revoke", new
+                var response = await http.PostAsJsonAsync("device-revoke", new
                 {
                     device_id = _cachedCredential.DeviceId,
                     device_secret = _cachedCredential.DeviceSecret
                 }, cancellationToken);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    _logger.LogInformation("Backend device revocation acknowledged for device {DeviceId}", _cachedCredential.DeviceId);
+                }
+                else
+                {
+                    var err = await response.Content.ReadAsStringAsync(cancellationToken);
+                    _logger.LogWarning("Backend device revocation returned status {StatusCode}: {Error}", (int)response.StatusCode, err);
+                }
             }
             catch (Exception ex)
             {
@@ -136,6 +235,7 @@ public sealed class DeviceAuthService
 
         await _credentialStore.DeleteAsync(cancellationToken);
         _cachedCredential = null;
+        NotifyUnpaired();
     }
 
     private HttpClient BuildFunctionsClient(string? ownerAccessToken)
@@ -143,10 +243,13 @@ public sealed class DeviceAuthService
         var http = _httpClientFactory.CreateClient();
         http.BaseAddress = new Uri($"{_supabaseOptions.Url.TrimEnd('/')}/functions/v1/");
         http.DefaultRequestHeaders.Add("apikey", _supabaseOptions.AnonKey);
-        if (!string.IsNullOrEmpty(ownerAccessToken))
-        {
-            http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", ownerAccessToken);
-        }
+
+        // Supabase Edge Function API Gateway (Kong) requires an Authorization header on all requests.
+        // If an owner token is available (e.g. device-pairing-create), use it.
+        // Otherwise (e.g. device-pairing-confirm, device-token-refresh, device-revoke),
+        // pass the anon key as the Bearer token so the gateway accepts the request.
+        var bearerToken = !string.IsNullOrEmpty(ownerAccessToken) ? ownerAccessToken : _supabaseOptions.AnonKey;
+        http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", bearerToken);
         return http;
     }
 

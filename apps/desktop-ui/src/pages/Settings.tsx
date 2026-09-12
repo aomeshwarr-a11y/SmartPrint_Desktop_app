@@ -4,7 +4,7 @@ import type { ServiceStatusDto } from "@shared/index";
 import {
   getSettings,
   updateSettings,
-  restartService,
+  restartAgent,
   exportDiagnostics,
   getServiceStatus,
 } from "../lib/ipc";
@@ -58,6 +58,7 @@ export default function Settings() {
   const [saving, setSaving] = useState<boolean>(false);
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
   const [feedbackNotice, setFeedbackNotice] = useState<string | null>(null);
+  const [restarting, setRestarting] = useState<boolean>(false);
 
   // Read configuration via real IPC on mount
   useEffect(() => {
@@ -164,13 +165,22 @@ export default function Settings() {
   };
 
   const handleRestartService = async () => {
-    setFeedbackNotice("Broadcasting restart command to SmartPrinter.Agent service...");
+    if (restarting) return;
+    setRestarting(true);
+    setFeedbackNotice("Restarting SmartPrinter Agent service — waiting for confirmed reconnection...");
     try {
-      await restartService();
-      setFeedbackNotice("Service restart signal sent. Named pipe reconnecting...");
+      const result = await restartAgent();
+      if (result.success) {
+        setFeedbackNotice("SmartPrinter Agent restarted successfully. Reconnected to named pipe.");
+        const status = await getServiceStatus().catch(() => null);
+        setServiceStatus(status);
+      } else {
+        setFeedbackNotice(`Failed to restart agent service: ${result.error ?? "Process did not start."}`);
+      }
     } catch (err: any) {
       setFeedbackNotice(err?.message || "Failed to restart agent service.");
     } finally {
+      setRestarting(false);
       setTimeout(() => setFeedbackNotice(null), 5000);
     }
   };
@@ -214,9 +224,10 @@ export default function Settings() {
           <button
             type="button"
             onClick={handleRestartService}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 shadow-2xs hover:bg-slate-50 transition cursor-pointer"
+            disabled={restarting}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 shadow-2xs hover:bg-slate-50 transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
           >
-            🔄 Restart Win32 Agent
+            🔄 {restarting ? "Restarting Agent..." : "Restart Win32 Agent"}
           </button>
           <button
             type="button"

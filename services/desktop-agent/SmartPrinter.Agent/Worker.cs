@@ -56,62 +56,109 @@ public sealed class Worker : BackgroundService
         // The named pipe server must come up immediately and unconditionally, regardless
         // of pairing/cloud state, so the Electron UI can always talk to the agent (to show
         // "not paired yet", offline banners, etc).
-        var pipeTask = _pipeServer.RunAsync(stoppingToken);
+        _ = _pipeServer.RunAsync(stoppingToken);
 
-        var credential = await _deviceAuth.LoadStoredCredentialAsync(stoppingToken);
-        if (credential == null)
+        while (!stoppingToken.IsCancellationRequested)
         {
-            _logger.LogInformation("Agent is not paired with a shop yet - waiting for pairing via the desktop UI");
-            await pipeTask; // Nothing else to do until PairDeviceConfirm arrives over IPC and the service is restarted.
-            return;
-        }
-
-        _state.DeviceId = Guid.Parse(credential.DeviceId);
-        _state.ShopId = Guid.Parse(credential.ShopId);
-
-        if (_options.MockCloudMode)
-        {
-            _logger.LogWarning(
-                "MockCloudMode is enabled - Supabase Realtime/job delivery is NOT active. " +
-                "Printer discovery and printing are real. Use the PrintTestPage IPC command " +
-                "or insert a row directly into print_jobs in SQLite to exercise the pipeline. " +
-                "See docs/DEVELOPMENT.md.");
-            await pipeTask;
-            return;
-        }
-
-        try
-        {
-            var accessToken = await _deviceAuth.RefreshAccessTokenAsync(stoppingToken);
-            await _gateway.AttachDeviceSessionAsync(accessToken);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to obtain a device access token - Realtime job delivery will not start until this succeeds");
-        }
-
-        // Crash/restart recovery must run before we start accepting new jobs, so a job
-        // left mid-flight by a previous crash is resolved first (see JobProcessor.RecoverAsync).
-        await _jobProcessor.RecoverAsync(stoppingToken);
-
-        await _realtimeListener.StartAsync(
-            _state.DeviceId.Value,
-            async job =>
+            var credential = await _deviceAuth.LoadStoredCredentialAsync(stoppingToken);
+            if (credential == null)
             {
-                _state.RealtimeConnected = true;
-                var printerName = await ResolvePrinterWindowsNameAsync(job.PrinterId, stoppingToken);
-                if (printerName == null)
+                _logger.LogInformation("Agent is not paired with a shop yet - waiting for pairing via the desktop UI");
+                _state.DeviceId = null;
+                _state.ShopId = null;
+                _state.RealtimeConnected = false;
+
+                // Wait until PairDeviceConfirm completes over IPC
+                await _deviceAuth.WaitForPairingAsync(stoppingToken);
+                continue;
+            }
+
+            _state.DeviceId = Guid.Parse(credential.DeviceId);
+            _state.ShopId = Guid.Parse(credential.ShopId);
+
+            if (_options.MockCloudMode)
+            {
+                _logger.LogWarning(
+                    "MockCloudMode is enabled - Supabase Realtime/job delivery is NOT active. " +
+                    "Printer discovery and printing are real. Use the PrintTestPage IPC command " +
+                    "or insert a row directly into print_jobs in SQLite to exercise the pipeline. " +
+                    "See docs/DEVELOPMENT.md.");
+                _state.MockCloudMode = true;
+                await _deviceAuth.WaitForUnpairAsync(stoppingToken);
+                continue;
+            }
+
+            // Authenticate with the backend - if this fails due to revocation, the device
+            // must be treated as unpaired and Realtime must NOT start.
+            string accessToken;
+            try
+            {
+                accessToken = await _deviceAuth.RefreshAccessTokenAsync(stoppingToken);
+                await _gateway.AttachDeviceSessionAsync(accessToken);
+                _logger.LogInformation("Device authentication succeeded for device {DeviceId}", _state.DeviceId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to obtain a device access token - Realtime will NOT start");
+
+                // If the credential was revoked, DeviceAuthService.RefreshAccessTokenAsync
+                // already called UnpairAsync (clearing the credential store). Reflect that
+                // in runtime state so the UI sees "unpaired" immediately.
+                if (!_deviceAuth.IsPaired)
                 {
-                    _logger.LogError("Received job for unknown/unauthorized printer id {PrinterId} - skipping", job.PrinterId);
-                    return;
+                    _logger.LogWarning("Device credential was revoked - device is now unpaired. " +
+                                       "Waiting for re-pairing via the desktop UI");
+                    _state.DeviceId = null;
+                    _state.ShopId = null;
+                    _state.RealtimeConnected = false;
                 }
-                await _jobProcessor.HandleAssignedJobAsync(job, printerName, stoppingToken);
-            },
-            stoppingToken);
 
-        var lastSeenTask = _lastSeenUpdater.RunAsync(_state.DeviceId.Value, stoppingToken);
+                // Wait until re-pairing occurs via desktop UI
+                await _deviceAuth.WaitForPairingAsync(stoppingToken);
+                continue;
+            }
 
-        await Task.WhenAll(pipeTask, lastSeenTask);
+            // Create a session cancellation token for the active pairing session.
+            // When an unpair occurs, cancelling this session token stops the Realtime
+            // listener and last-seen updater cleanly without stopping the entire Worker.
+            using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+
+            // Crash/restart recovery must run before we start accepting new jobs
+            await _jobProcessor.RecoverAsync(sessionCts.Token);
+
+            var activeDeviceId = _state.DeviceId.Value;
+
+            await _realtimeListener.StartAsync(
+                activeDeviceId,
+                async job =>
+                {
+                    _state.RealtimeConnected = true;
+                    var printerName = await ResolvePrinterWindowsNameAsync(job.PrinterId, sessionCts.Token);
+                    if (printerName == null)
+                    {
+                        _logger.LogError("Received job for unknown/unauthorized printer id {PrinterId} - skipping", job.PrinterId);
+                        return;
+                    }
+                    await _jobProcessor.HandleAssignedJobAsync(job, printerName, sessionCts.Token);
+                },
+                sessionCts.Token);
+
+            var lastSeenTask = _lastSeenUpdater.RunAsync(activeDeviceId, sessionCts.Token);
+
+            // Wait until device is unpaired or stoppingToken is cancelled
+            await _deviceAuth.WaitForUnpairAsync(sessionCts.Token);
+
+            _logger.LogInformation("Device unpair event detected in worker - stopping active cloud session for device {DeviceId}", activeDeviceId);
+
+            // Stop Realtime listener and cancel session tasks
+            await _realtimeListener.StopAsync();
+            sessionCts.Cancel();
+            try { await lastSeenTask; } catch (OperationCanceledException) { }
+
+            _state.DeviceId = null;
+            _state.ShopId = null;
+            _state.RealtimeConnected = false;
+        }
     }
 
     private async Task<string?> ResolvePrinterWindowsNameAsync(Guid printerId, CancellationToken cancellationToken)

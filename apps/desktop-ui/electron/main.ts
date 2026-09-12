@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, shell } from "electron";
 import * as path from "node:path";
 import { autoUpdater } from "electron-updater";
 import { agentPipeClient } from "./pipeClient";
+import { agentProcessManager } from "./agentProcessManager";
 
 const isDev = process.env.NODE_ENV === "development";
 
@@ -90,6 +91,12 @@ const AGENT_CALL_CHANNEL = "agent:call";
 
 ipcMain.handle(AGENT_CALL_CHANNEL, async (_event, command: string, payload?: unknown) => {
   return agentPipeClient.call(command, payload);
+});
+
+// Dedicated restart channel that uses the full restart-and-reconnect flow instead of
+// just forwarding the RestartService command (which would fail when the pipe closes).
+ipcMain.handle("agent:restart", async () => {
+  return agentProcessManager.restartAgent();
 });
 
 ipcMain.handle("shell:openExternal", (_event, url: string) => {

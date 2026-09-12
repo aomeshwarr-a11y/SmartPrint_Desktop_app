@@ -148,3 +148,10 @@ export interface GetLogsResponse {
   file?: string;
   lines: string[];
 }
+
+export interface AgentRestartResult {
+  success: boolean;
+  pid?: number;
+  status: "running" | "stopped" | "error";
+  error?: string;
+}

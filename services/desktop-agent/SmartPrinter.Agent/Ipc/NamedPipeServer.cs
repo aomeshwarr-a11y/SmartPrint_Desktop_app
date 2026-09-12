@@ -136,7 +136,14 @@ public sealed class NamedPipeServer
                     try
                     {
                         var request = JsonSerializer.Deserialize<IpcRequest>(line, JsonOptions);
-                        response = await _router.DispatchAsync(request, cancellationToken);
+                        if (request == null)
+                        {
+                            response = IpcResponse.Fail("unknown", "Empty or invalid IPC request.");
+                        }
+                        else
+                        {
+                            response = await _router.DispatchAsync(request, cancellationToken);
+                        }
                     }
                     catch (Exception ex)
                     {

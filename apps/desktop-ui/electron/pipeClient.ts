@@ -51,6 +51,61 @@ export class AgentPipeClient {
     });
   }
 
+  /**
+   * Sends the RestartService command, then waits for the Agent process to exit and
+   * come back up. Returns only after the new Agent is confirmed responsive on the pipe.
+   *
+   * Flow:
+   * 1. Send RestartService → Agent responds { restarting: true } then exits after 500ms.
+   * 2. The pipe connection closes (onClose fires, rejecting any remaining pending calls).
+   * 3. Poll for reconnection with exponential backoff, up to ~30 seconds total.
+   * 4. Once reconnected, call GetServiceStatus to confirm the Agent is fully ready.
+   * 5. Return the live ServiceStatus to the caller.
+   */
+  async restartAgent(): Promise<{ success: boolean; status?: unknown; error?: string }> {
+    // Step 1: Send the restart signal. The Agent will exit(0) after ~500ms.
+    // The response may arrive before exit, or the pipe may close before we get it.
+    try {
+      await this.call("RestartService", undefined, 3000);
+    } catch {
+      // Expected: pipe closes when the Agent exits. The RestartService response may
+      // or may not arrive before the process dies - either way, we proceed.
+    }
+
+    // Step 2: Drop the existing socket. The Agent is exiting/exited.
+    this.disconnect();
+
+    // Step 3: Wait a moment for the old process to fully exit before polling.
+    await this.sleep(1500);
+
+    // Step 4: Poll for the new Agent to start and accept pipe connections.
+    const maxAttempts = 12;
+    let lastError = "";
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await this.ensureConnected();
+
+        // Step 5: Pipe connected - call GetServiceStatus to verify Agent is fully ready.
+        const status = await this.call("GetServiceStatus", undefined, 5000);
+        return { success: true, status };
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err.message : String(err);
+        this.disconnect();
+
+        if (attempt < maxAttempts) {
+          // Backoff: 1s, 1.5s, 2s, 2.5s, 3s ... up to 3s
+          const delay = Math.min(1000 + (attempt - 1) * 500, 3000);
+          await this.sleep(delay);
+        }
+      }
+    }
+
+    return {
+      success: false,
+      error: `Agent did not come back online after restart. Last error: ${lastError}`,
+    };
+  }
+
   private ensureConnected(): Promise<void> {
     if (this.socket && !this.socket.destroyed) {
       return Promise.resolve();
@@ -79,6 +134,28 @@ export class AgentPipeClient {
     });
 
     return this.connecting;
+  }
+
+  /**
+   * Forcibly drops the current socket and clears pending state. Used during restart
+   * to ensure a clean reconnection to the new Agent process.
+   */
+  public disconnect(): void {
+    if (this.socket) {
+      try { this.socket.destroy(); } catch { /* ignore */ }
+      this.socket = null;
+    }
+    this.connecting = null;
+    this.buffer = "";
+    for (const [, pending] of this.pending) {
+      clearTimeout(pending.timeout);
+      // Don't reject - the caller (restartAgent) already handles this.
+    }
+    this.pending.clear();
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private onData(chunk: Buffer) {

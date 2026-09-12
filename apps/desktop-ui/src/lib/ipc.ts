@@ -1,5 +1,6 @@
 import {
   IpcCommands,
+  type AgentRestartResult,
   type AuthorizePrinterRequest,
   type ExportDiagnosticsResponse,
   type GetLogsResponse,
@@ -62,8 +63,12 @@ export async function unpairDevice(): Promise<void> {
   await window.smartprinter.callAgent(IpcCommands.UnpairDevice);
 }
 
-export async function restartService(): Promise<void> {
-  await window.smartprinter.callAgent(IpcCommands.RestartService);
+export async function restartAgent(): Promise<AgentRestartResult> {
+  return window.smartprinter.restartAgent();
+}
+
+export async function restartService(): Promise<AgentRestartResult> {
+  return restartAgent();
 }
 
 export async function getLogs(): Promise<GetLogsResponse> {

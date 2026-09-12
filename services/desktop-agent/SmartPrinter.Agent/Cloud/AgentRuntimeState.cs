@@ -12,5 +12,6 @@ public sealed class AgentRuntimeState
     public Guid? DeviceId { get; set; }
     public Guid? ShopId { get; set; }
     public bool RealtimeConnected { get; set; }
+    public bool MockCloudMode { get; set; }
     public DateTime StartedAtUtc { get; } = DateTime.UtcNow;
 }
