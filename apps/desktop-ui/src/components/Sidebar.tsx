@@ -1,5 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { NavLink, useLocation } from "react-router-dom";
+import { getServiceStatus, getJobs, getPrinters } from "../lib/ipc";
+import { supabase } from "../lib/supabaseClient";
+import { useAuth } from "../context/AuthContext";
+import type { ServiceStatusDto } from "@shared/index";
 
 interface NavItem {
   to: string;
@@ -11,32 +15,55 @@ interface NavItem {
 
 export default function Sidebar() {
   const location = useLocation();
+  const { session } = useAuth();
 
   // Live Agent / Hardware status
-  const [spoolerConnected, setSpoolerConnected] = useState<boolean>(true);
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatusDto | null>(null);
+  const [spoolerConnected, setSpoolerConnected] = useState<boolean>(false);
   const [activeJobCount, setActiveJobCount] = useState<number>(0);
-  const [agentVersion, setAgentVersion] = useState<string>("v2.4.1");
+  const [printerCount, setPrinterCount] = useState<number>(0);
+  const [agentVersion, setAgentVersion] = useState<string>("v2.0");
+  const [shopSlug, setShopSlug] = useState<string>("");
 
   useEffect(() => {
-    // Check real IPC service status if available in Electron
     async function checkAgentStatus() {
       try {
-        if ((window as any).electron?.ipcRenderer) {
-          const res = await (window as any).electron.ipcRenderer.invoke("GetServiceStatus");
-          if (res?.success && res.data) {
-            setSpoolerConnected(res.data.realtimeConnected ?? true);
-            setActiveJobCount(res.data.queuedJobCount ?? 0);
-            if (res.data.agentVersion) setAgentVersion(`v${res.data.agentVersion}`);
-          }
+        const [status, jobs, printers] = await Promise.all([
+          getServiceStatus().catch(() => null),
+          getJobs().catch(() => []),
+          getPrinters().catch(() => []),
+        ]);
+
+        if (status) {
+          setServiceStatus(status);
+          setSpoolerConnected(true);
+          if (status.agentVersion) setAgentVersion(`v${status.agentVersion}`);
+        } else {
+          setSpoolerConnected(false);
         }
+        setActiveJobCount(jobs.filter((j) => j.status === "queued" || j.status === "printing" || j.status === "claimed").length);
+        setPrinterCount(printers.length);
       } catch (err) {
-        // Retain default active status
+        setSpoolerConnected(false);
       }
     }
     checkAgentStatus();
     const timer = setInterval(checkAgentStatus, 8000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    async function loadShopSlug() {
+      if (!session) return;
+      const { data } = await supabase
+        .from("shops")
+        .select("slug")
+        .eq("owner_user_id", session.user.id)
+        .maybeSingle();
+      if (data?.slug) setShopSlug(data.slug);
+    }
+    void loadShopSlug();
+  }, [session]);
 
   const navItems: NavItem[] = [
     {
@@ -99,7 +126,7 @@ export default function Sidebar() {
     {
       to: "/printers/status",
       label: "Printer Status",
-      badge: "2 Online",
+      badge: printerCount > 0 ? `${printerCount} Online` : undefined,
       badgeType: "neutral",
       icon: (active) => (
         <svg
@@ -242,7 +269,7 @@ export default function Sidebar() {
           <div className="flex items-center gap-1.5">
             <span
               className={`h-2 w-2 rounded-full ${
-                spoolerConnected ? "bg-emerald-500 animate-pulse" : "bg-amber-500"
+                spoolerConnected ? "bg-emerald-500 animate-pulse" : "bg-rose-500"
               }`}
             />
             <span className="font-semibold text-slate-700">Win32 Agent</span>
@@ -314,10 +341,16 @@ export default function Sidebar() {
         {/* Workstation Identification */}
         <div className="rounded-xl border border-slate-200/70 bg-white p-2.5 shadow-2xs">
           <div className="flex items-center justify-between text-[11px]">
-            <span className="font-semibold text-slate-800">Station 01</span>
-            <span className="text-[10px] font-mono text-emerald-600 font-medium">Ready</span>
+            <span className="font-semibold text-slate-800">
+              {serviceStatus?.deviceId ? `STATION-${serviceStatus.deviceId.slice(0, 8)}` : "Station 01"}
+            </span>
+            <span className={`text-[10px] font-mono font-medium ${spoolerConnected ? "text-emerald-600" : "text-rose-500"}`}>
+              {spoolerConnected ? "Ready" : "Offline"}
+            </span>
           </div>
-          <p className="text-[10px] text-slate-400 truncate mt-0.5">smartprinter.in/s/my-print-shop</p>
+          <p className="text-[10px] text-slate-400 truncate mt-0.5">
+            {shopSlug ? `smartprinter.in/s/${shopSlug}` : "smartprinter.in/setup"}
+          </p>
         </div>
 
         {/* Log out / Unpair Button */}

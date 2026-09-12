@@ -1,59 +1,26 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { useSearchParams, useNavigate, Link } from "react-router-dom";
-interface PrinterTelemetryData {
-  name: string;
-  driverName?: string;
-  portName?: string;
-  isDefault?: boolean;
+import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
+import type { PrinterInfo, ServiceStatusDto, PrintJobRecord } from "@shared/index";
+import {
+  getServiceStatus,
+  getPrinters,
+  getJobs,
+  printTestPage,
+  exportDiagnostics,
+} from "../lib/ipc";
+
+interface PrinterTelemetryData extends PrinterInfo {
   status?: string;
   isOnline?: boolean;
-  availability?: string;
-  fingerprint?: string;
-  engineType?: string;
-  ipAddress?: string;
-  ppmSpeed?: number;
-  fuserTemp?: string;
-  lifetimePages?: number;
-  wasteBoxOk?: boolean;
-  supportsColor?: boolean;
-  supportsDuplex?: boolean;
-  toner?: Array<{
-    label: string;
-    percent: number;
-    colorClass?: string;
-  }>;
-  trays?: Array<{
-    name: string;
-    capacity: string;
-    percent: number;
-  }>;
-}
-
-interface ServiceStatusState {
-  agentVersion?: string;
-  serviceVersion?: string;
-  pipeConnected?: boolean;
-  isPaired?: boolean;
-  realtimeConnected?: boolean;
-  mockCloudMode?: boolean;
-  queuedJobCount?: number;
-}
-
-interface ActiveJobState {
-  id: string;
-  documentTitle?: string;
-  printerName?: string;
-  status?: string;
 }
 
 export default function PrinterStatusPage() {
   const [searchParams] = useSearchParams();
-  const navigate = useNavigate();
   const targetPrinterName = searchParams.get("target");
 
-  const [serviceStatus, setServiceStatus] = useState<ServiceStatusState | null>(null);
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatusDto | null>(null);
   const [hardwareFleet, setHardwareFleet] = useState<PrinterTelemetryData[]>([]);
-  const [activeJobs, setActiveJobs] = useState<ActiveJobState[]>([]);
+  const [activeJobs, setActiveJobs] = useState<PrintJobRecord[]>([]);
 
   const [testPrintFeedback, setTestPrintFeedback] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState<boolean>(false);
@@ -62,42 +29,21 @@ export default function PrinterStatusPage() {
   const fetchTelemetry = useCallback(async () => {
     setRefreshing(true);
     try {
-      if (!(window as any).electron?.ipcRenderer) {
-        setServiceStatus(null);
-        setHardwareFleet([]);
-        setActiveJobs([]);
-        return;
-      }
-
-      const ipc = (window as any).electron.ipcRenderer;
-
       const [statusRes, printersRes, jobsRes] = await Promise.all([
-        ipc.invoke("GetServiceStatus"),
-        ipc.invoke("GetPrinters"),
-        ipc.invoke("GetJobs"),
+        getServiceStatus().catch(() => null),
+        getPrinters().catch(() => [] as PrinterInfo[]),
+        getJobs().catch(() => [] as PrintJobRecord[]),
       ]);
 
-      if (statusRes?.success && statusRes.data) {
-        setServiceStatus(statusRes.data as ServiceStatusState);
-      } else {
-        setServiceStatus(null);
-      }
-
-      if (printersRes?.success && Array.isArray(printersRes.data)) {
-        setHardwareFleet(printersRes.data as PrinterTelemetryData[]);
-      } else if (Array.isArray(printersRes)) {
-        setHardwareFleet(printersRes as PrinterTelemetryData[]);
-      } else {
-        setHardwareFleet([]);
-      }
-
-      if (jobsRes?.success && Array.isArray(jobsRes.data)) {
-        setActiveJobs(jobsRes.data as ActiveJobState[]);
-      } else if (Array.isArray(jobsRes)) {
-        setActiveJobs(jobsRes as ActiveJobState[]);
-      } else {
-        setActiveJobs([]);
-      }
+      setServiceStatus(statusRes);
+      setHardwareFleet(
+        printersRes.map((p) => ({
+          ...p,
+          status: p.availability === "Ready" ? "Ready" : "Offline",
+          isOnline: p.availability === "Ready",
+        }))
+      );
+      setActiveJobs(jobsRes);
     } catch (err) {
       console.warn("Hardware telemetry IPC invocation failed:", err);
       setServiceStatus(null);
@@ -118,17 +64,8 @@ export default function PrinterStatusPage() {
   const handlePrintTest = async (printerName: string) => {
     setTestPrintFeedback(`Submitting test page to ${printerName}...`);
     try {
-      if ((window as any).electron?.ipcRenderer) {
-        const ipc = (window as any).electron.ipcRenderer;
-        const res = await ipc.invoke("PrintTestPage", { printerName });
-        if (res?.success) {
-          setTestPrintFeedback(`Test page spooled successfully to ${printerName}.`);
-        } else {
-          setTestPrintFeedback(`Spooler alert: ${res?.error || "Print submission rejected"}`);
-        }
-      } else {
-        setTestPrintFeedback("Test printing is available only in the SmartPrinter desktop agent.");
-      }
+      await printTestPage({ printerName });
+      setTestPrintFeedback(`Test page spooled successfully to ${printerName}.`);
     } catch (err: any) {
       setTestPrintFeedback(err?.message || "Failed to trigger test print");
     } finally {
@@ -147,17 +84,21 @@ export default function PrinterStatusPage() {
               Win32 Hardware Subsystem
             </span>
             <span>•</span>
-            <span>winspool.drv Hook Active</span>
+            <span>winspool.drv Subsystem</span>
             <span>•</span>
-            <span className="font-mono text-[11px]">Agent v{serviceStatus?.agentVersion}</span>
+            <span className="font-mono text-[11px]">
+              Agent {serviceStatus?.agentVersion ? `v${serviceStatus.agentVersion}` : "Offline"}
+            </span>
             <span>•</span>
-            <span className="font-mono text-[11px] text-slate-400">IPC: \\.\pipe\SmartPrinterAgent</span>
+            <span className="font-mono text-[11px] text-slate-400">
+              IPC: {serviceStatus ? "Connected (Named Pipe)" : "Disconnected"}
+            </span>
           </div>
           <h1 className="mt-1 text-xl font-bold tracking-tight text-slate-900 lg:text-2xl">
             Printer Fleet Status &amp; Hardware Telemetry
           </h1>
           <p className="mt-0.5 text-xs text-slate-500">
-            Real-time port inspection, ink/toner metrics, paper trays, and spooler driver diagnostics across local Win32 instances.
+            Real-time port inspection, capabilities, and spooler driver diagnostics across local Win32 instances.
           </p>
         </div>
 
@@ -217,30 +158,21 @@ export default function PrinterStatusPage() {
           </div>
           <div className="mt-1 flex items-baseline gap-1.5">
             <span className="text-2xl font-bold text-slate-900">
-              {hardwareFleet.filter(
-                (printer) => printer.isOnline ?? printer.availability === "Ready"
-              ).length}{" "}
-              / {hardwareFleet.length}
+              {hardwareFleet.filter((p) => p.isOnline).length} / {hardwareFleet.length}
             </span>
             <span className="text-xs font-semibold text-emerald-600">
               {hardwareFleet.length > 0
                 ? `${Math.round(
-                    (hardwareFleet.filter(
-                      (printer) => printer.isOnline ?? printer.availability === "Ready"
-                    ).length /
-                      hardwareFleet.length) *
-                      100
+                    (hardwareFleet.filter((p) => p.isOnline).length / hardwareFleet.length) * 100
                   )}% Operational`
                 : "No telemetry"}
             </span>
           </div>
           <p className="mt-1 text-[11px] text-slate-400">
-              {hardwareFleet.length > 0
-                ? `${hardwareFleet.filter(
-                    (printer) => !(printer.isOnline ?? printer.availability === "Ready")
-                  ).length} offline units detected`
-                : "No printer telemetry available"}
-            </p>
+            {hardwareFleet.length > 0
+              ? `${hardwareFleet.filter((p) => !p.isOnline).length} offline units detected`
+              : "No printer telemetry available"}
+          </p>
         </div>
 
         <div className="rounded-xl border border-slate-200/90 bg-white p-4 shadow-xs">
@@ -251,51 +183,42 @@ export default function PrinterStatusPage() {
             <span className="text-base">⚡</span>
           </div>
           <p className="mt-1 text-2xl font-bold text-slate-900">
-            {serviceStatus?.pipeConnected ? "Connected" : "—"}
+            {serviceStatus ? "Connected" : "Offline"}
           </p>
           <p className="mt-1 font-mono text-[11px] text-emerald-600 font-semibold">
-            {serviceStatus?.pipeConnected ? "Named Pipe Connected" : "Pipe status unavailable"}
+            {serviceStatus ? "Named Pipe Active" : "Service not responding"}
           </p>
         </div>
 
         <div className="rounded-xl border border-slate-200/90 bg-white p-4 shadow-xs">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              Toner &amp; Consumables
+              Color Capability
             </span>
-            <span className="text-base">💧</span>
+            <span className="text-base">🎨</span>
           </div>
           <p className="mt-1 text-2xl font-bold text-slate-900">
-            {hardwareFleet.some((printer) => printer.toner?.length) ? "Available" : "—"}
+            {hardwareFleet.filter((p) => p.supportsColor).length} / {hardwareFleet.length}
           </p>
           <p className="mt-1 text-[11px] text-slate-400">
-            {(() => {
-              const levels = hardwareFleet
-                .flatMap((printer) => printer.toner || [])
-                .map((toner) => toner.percent)
-                .filter((value): value is number => typeof value === "number");
-              return levels.length
-                ? `Minimum ${Math.min(...levels)}%`
-                : "No consumable telemetry available";
-            })()}
+            {hardwareFleet.filter((p) => p.supportsColor).length > 0
+              ? `${hardwareFleet.filter((p) => p.supportsColor).length} Color enabled queues`
+              : "All queues monochrome"}
           </p>
         </div>
 
         <div className="rounded-xl border border-slate-200/90 bg-white p-4 shadow-xs">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              Paper Trays Status
+              Active Agent Jobs
             </span>
             <span className="text-base">📦</span>
           </div>
           <p className="mt-1 text-2xl font-bold text-slate-900">
-            {hardwareFleet.some((printer) => printer.trays?.length) ? "Available" : "—"}
+            {activeJobs.length}
           </p>
           <p className="mt-1 text-[11px] text-slate-400">
-            {(() => {
-              const trays = hardwareFleet.flatMap((printer) => printer.trays || []);
-              return trays.length ? `${trays.length} tray${trays.length === 1 ? "" : "s"} reported` : "No tray telemetry available";
-            })()}
+            {activeJobs.filter((j) => j.status === "printing").length} actively printing
           </p>
         </div>
       </div>
@@ -304,13 +227,7 @@ export default function PrinterStatusPage() {
       <div className="space-y-4">
         {hardwareFleet.map((printer) => {
           const isTargeted = targetPrinterName === printer.name;
-          const availability = printer.isOnline
-            ? printer.status === "printing"
-              ? "Busy"
-              : "Ready"
-            : "Offline";
-          const isReady = availability === "Ready";
-          const isBusy = availability === "Busy";
+          const isReady = printer.isOnline;
 
           return (
             <div
@@ -334,12 +251,12 @@ export default function PrinterStatusPage() {
                         </span>
                       )}
                       <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600 uppercase font-mono">
-                        {printer?.engineType || "—"}
+                        {printer.supportsColor ? "Color" : "Monochrome"}
                       </span>
                     </div>
                     <p className="mt-0.5 font-mono text-xs text-slate-400">
-                      Port: <span className="text-slate-700 font-semibold">{printer?.portName}</span> •
-                      Fingerprint: <span className="text-slate-500">{printer?.fingerprint}</span>
+                      Port: <span className="text-slate-700 font-semibold">{printer.portName || "Local"}</span> •
+                      Fingerprint: <span className="text-slate-500">{printer.fingerprint || "Unavailable"}</span>
                     </p>
                   </div>
                 </div>
@@ -347,14 +264,10 @@ export default function PrinterStatusPage() {
                 <div className="flex items-center gap-2">
                   <span
                     className={`rounded px-2.5 py-1 text-xs font-bold uppercase tracking-wider ${
-                      isReady
-                        ? "bg-emerald-100 text-emerald-800"
-                        : isBusy
-                        ? "bg-blue-100 text-blue-800"
-                        : "bg-rose-100 text-rose-800"
+                      isReady ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"
                     }`}
                   >
-                    ● {printer.availability}
+                    ● {isReady ? "Ready" : "Offline"}
                   </span>
                   <button
                     type="button"
@@ -365,99 +278,95 @@ export default function PrinterStatusPage() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => alert(`Restarting print spooler driver for ${printer.name}...`)}
+                    onClick={() => handlePrintTest(printer.name)}
                     className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700 shadow-2xs hover:bg-slate-50 transition"
                   >
-                    Restart Driver
+                    Verify Spooler
                   </button>
                 </div>
               </div>
 
               {/* Middle: 3-Column Metrics Breakdown */}
               <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
-                {/* Consumables Gauges */}
+                {/* Consumables & Capabilities */}
                 <div className="rounded-xl border border-slate-100 bg-slate-50/50 p-3.5">
                   <div className="flex items-center justify-between text-xs font-bold text-slate-700 mb-2.5">
-                    <span>Consumables &amp; Inks</span>
-                    {printer.wasteBoxOk && (
-                      <span className="font-mono text-[10px] text-emerald-600 font-semibold">
-                        Waste Box: OK
-                      </span>
-                    )}
+                    <span>Print Capabilities</span>
+                    <span className="font-mono text-[10px] text-emerald-600 font-semibold">
+                      {printer.supportsColor ? "Full Color" : "Monochrome"}
+                    </span>
                   </div>
-                  <div className="space-y-2">
-                    {(printer.toner ?? []).map((t) => (
-                      <div key={t.label}>
-                        <div className="flex justify-between text-[11px] font-medium text-slate-600 mb-0.5">
-                          <span>{t.label}</span>
-                          <span className="font-mono font-bold text-slate-800">{t.percent}%</span>
-                        </div>
-                        <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
-                          <div className={`h-full ${t.colorClass}`} style={{ width: `${t.percent}%` }} />
-                        </div>
-                      </div>
-                    ))}
+                  <div className="space-y-2 text-xs">
+                    <div className="flex justify-between text-slate-600">
+                      <span>Color Printing:</span>
+                      <span className="font-semibold text-slate-800">{printer.supportsColor ? "Supported" : "No"}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-600">
+                      <span>Duplex Printing:</span>
+                      <span className="font-semibold text-slate-800">{printer.supportsDuplex ? "Supported" : "Simplex Only"}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-600">
+                      <span>Default System Queue:</span>
+                      <span className="font-semibold text-slate-800">{printer.isDefault ? "Yes" : "No"}</span>
+                    </div>
                   </div>
                 </div>
 
-                {/* Paper Cassettes */}
+                {/* Port & Connection */}
                 <div className="rounded-xl border border-slate-100 bg-slate-50/50 p-3.5">
                   <div className="text-xs font-bold text-slate-700 mb-2.5">
-                    Paper Cassettes &amp; Trays
+                    Port &amp; Hardware Connection
                   </div>
-                  <div className="space-y-2.5">
-                    {(printer.trays ?? []).map((tray) => (
-                      <div key={tray.name} className="rounded-lg border border-slate-200/70 bg-white p-2 text-xs">
-                        <div className="flex justify-between font-medium text-slate-800">
-                          <span>{tray.name}</span>
-                          <span className="font-mono font-semibold text-emerald-700">{tray.capacity}</span>
-                        </div>
-                        <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
-                          <div className="h-full bg-emerald-600" style={{ width: `${tray.percent}%` }} />
-                        </div>
-                      </div>
-                    ))}
+                  <div className="space-y-2 text-xs">
+                    <div className="flex justify-between text-slate-600">
+                      <span>Port Name:</span>
+                      <span className="font-mono font-semibold text-slate-800">{printer.portName || "Local"}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-600">
+                      <span>Port Type:</span>
+                      <span className="font-semibold text-slate-800">
+                        {printer.portName?.toUpperCase().includes("USB")
+                          ? "USB Port"
+                          : printer.portName?.toUpperCase().includes("IP") || printer.portName?.includes(".")
+                          ? "Standard TCP/IP Network"
+                          : "Virtual / Spooler Port"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-slate-600">
+                      <span>Driver Fingerprint:</span>
+                      <span className="font-mono text-[10px] text-slate-500 truncate max-w-[150px]">
+                        {printer.fingerprint || "Unavailable"}
+                      </span>
+                    </div>
                   </div>
                 </div>
 
                 {/* Spooler & Hardware Telemetry */}
                 <div className="rounded-xl border border-slate-100 bg-slate-50/50 p-3.5">
                   <div className="text-xs font-bold text-slate-700 mb-2.5">
-                    Win32 Driver &amp; Life Metrics
+                    Win32 Driver &amp; Spooler Status
                   </div>
                   <div className="space-y-1.5 font-mono text-[11px] text-slate-600">
                     <div className="flex justify-between">
                       <span className="text-slate-400">Driver:</span>
-                      <span className="truncate max-w-[170px] text-slate-800 font-semibold">{printer?.driverName}</span>
+                      <span className="truncate max-w-[170px] text-slate-800 font-semibold">{printer.driverName}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-slate-400">Duplex Support:</span>
-                      <span className="text-slate-800">{printer.supportsDuplex ? "Supported" : "Simplex Only"}</span>
+                      <span className="text-slate-400">Availability Code:</span>
+                      <span className="text-slate-800">{printer.availability}</span>
                     </div>
-                    {printer?.fuserTemp && (
-                      <div className="flex justify-between">
-                        <span className="text-slate-400">Fuser Temp:</span>
-                        <span className="text-emerald-700 font-semibold">{printer?.fuserTemp}</span>
-                      </div>
-                    )}
-                    {typeof printer?.lifetimePages === "number" && (
-                      <div className="flex justify-between">
-                        <span className="text-slate-400">Lifetime Pages:</span>
-                        <span className="text-slate-800 font-bold">{printer?.lifetimePages.toLocaleString()}</span>
-                      </div>
-                    )}
                     <div className="flex justify-between pt-1 border-t border-slate-200/60">
-                      <span className="text-slate-400">Active Spooler Job:</span>
+                      <span className="text-slate-400">Queued Agent Jobs:</span>
                       <span className="text-slate-800 font-semibold">
-                        {(() => {
-                          const printerJobs = activeJobs.filter(
-                            (job) => job.printerName === printer.name
-                          );
-                          const printingJob = printerJobs.find((job) => job.status === "printing");
-                          return printingJob
-                            ? `${printingJob.id} (Printing)`
-                            : `${printerJobs.length} pending job${printerJobs.length === 1 ? "" : "s"}`;
-                        })()}
+                        {activeJobs.filter((j) => {
+                          try {
+                            if (j.optionsJson) {
+                              const parsed = JSON.parse(j.optionsJson);
+                              return parsed.printerName === printer.name;
+                            }
+                          } catch {}
+                          return false;
+                        }).length} jobs
                       </span>
                     </div>
                   </div>
@@ -482,15 +391,11 @@ export default function PrinterStatusPage() {
             type="button"
             onClick={async () => {
               try {
-                if (!(window as any).electron?.ipcRenderer) {
-                  setTestPrintFeedback("Diagnostics export is available only in the desktop agent.");
-                  return;
-                }
-                const res = await (window as any).electron.ipcRenderer.invoke("ExportDiagnostics");
+                const res = await exportDiagnostics();
                 setTestPrintFeedback(
-                  res?.success
-                    ? `Diagnostics exported${res.data?.bundlePath ? ` to ${res.data.bundlePath}` : ""}.`
-                    : res?.error || "Diagnostics export failed."
+                  res?.bundlePath
+                    ? `Diagnostics exported to ${res.bundlePath}.`
+                    : "Diagnostics export completed."
                 );
               } catch (err) {
                 setTestPrintFeedback(err instanceof Error ? err.message : "Diagnostics export failed.");
@@ -498,7 +403,7 @@ export default function PrinterStatusPage() {
                 setTimeout(() => setTestPrintFeedback(null), 4000);
               }
             }}
-            className="font-semibold text-emerald-700 hover:underline"
+            className="font-semibold text-emerald-700 hover:underline cursor-pointer"
           >
             Export Full Hardware Event Log (.evtx / JSON) →
           </button>
@@ -511,14 +416,17 @@ export default function PrinterStatusPage() {
             <>
               {hardwareFleet.map((printer) => (
                 <p key={`printer-${printer.name}`} className="text-emerald-400">
-                  {printer.name}: {printer.status} • {printer.isOnline ? "Online" : "Offline"} • Port {printer?.portName || "—"}
+                  {printer.name}: {printer.status} • {printer.isOnline ? "Online" : "Offline"} • Port {printer.portName || "Local"}
                 </p>
               ))}
-              {activeJobs.map((job) => (
-                <p key={`job-${job.id}`} className="text-sky-300">
-                  Job {job.id}: {job.documentTitle} • {job.status} • {job.printerName || "Printer unavailable"}
-                </p>
-              ))}
+              {activeJobs.map((job) => {
+                const title = job.storagePath ? job.storagePath.split("/").pop()?.split("\\").pop() : `Job #${job.printJobId.slice(0, 8)}`;
+                return (
+                  <p key={`job-${job.printJobId}`} className="text-sky-300">
+                    Job {job.printJobId.slice(0, 8)}: {title} • Status: {job.status} • Spooler Job ID: {job.spoolerJobId ?? "Pending"}
+                  </p>
+                );
+              })}
             </>
           )}
         </div>

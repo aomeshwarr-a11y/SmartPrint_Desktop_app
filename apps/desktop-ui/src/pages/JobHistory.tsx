@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import type { PrintJobRecord } from "../../../../packages/shared-contracts/src";
+import { useNavigate } from "react-router-dom";
+import type { PrintJobRecord } from "@shared/index";
+import { getJobs, exportDiagnostics } from "../lib/ipc";
 
 interface HistoricalJobUi {
   printJobId: string;
@@ -40,18 +41,9 @@ export default function JobHistory() {
   // Load archived jobs from the local Windows agent.
   const fetchHistory = useCallback(async () => {
     try {
-      if (!(window as any).electron?.ipcRenderer) {
-        setHistoryJobs([]);
-        return;
-      }
-
-      const ipc = (window as any).electron.ipcRenderer;
-      const res = await ipc.invoke("GetJobs");
-
-      if (res?.success && Array.isArray(res.data)) {
-        setHistoryJobs(res.data as HistoricalJobUi[]);
-      } else if (Array.isArray(res)) {
-        setHistoryJobs(res as HistoricalJobUi[]);
+      const data = await getJobs();
+      if (Array.isArray(data)) {
+        setHistoryJobs(data as HistoricalJobUi[]);
       } else {
         setHistoryJobs([]);
       }
@@ -80,18 +72,11 @@ export default function JobHistory() {
     setExportNotice(null);
 
     try {
-      if (!(window as any).electron?.ipcRenderer) {
-        setExportNotice("Audit export is unavailable outside the desktop agent.");
-        return;
-      }
-
-      const ipc = (window as any).electron.ipcRenderer;
-      const res = await ipc.invoke("ExportDiagnostics");
-
-      if (res?.success && res.data?.bundlePath) {
-        setExportNotice(`Audit bundle exported to ${res.data.bundlePath}`);
+      const res = await exportDiagnostics();
+      if (res?.bundlePath) {
+        setExportNotice(`Audit bundle exported to ${res.bundlePath}`);
       } else {
-        setExportNotice(res?.error || "Failed to export audit bundle.");
+        setExportNotice("Audit bundle export completed.");
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to export audit bundle.";
@@ -340,8 +325,8 @@ export default function JobHistory() {
             <span className="text-xs text-slate-400">pages</span>
           </div>
           <div className="mt-1.5 flex items-center gap-2 text-[11px] text-slate-500">
-            <span>● Color: 42%</span>
-            <span>● Mono: 58%</span>
+            <span>● Color: {colorPages}</span>
+            <span>● Mono: {monoPages}</span>
           </div>
         </div>
 
@@ -444,7 +429,7 @@ export default function JobHistory() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredJobs.map((job) => {
+              {paginatedJobs.map((job) => {
                 const isCompleted = job.status === "completed";
                 const isFailed = job.status === "failed" || job.status === "cancelled";
                 const options = getJobOptions(job);

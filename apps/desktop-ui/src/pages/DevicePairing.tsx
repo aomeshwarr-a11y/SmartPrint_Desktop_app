@@ -1,33 +1,43 @@
-import React, { useState, useEffect, useCallback } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useState, useEffect, useCallback, Fragment } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import type {
-  PairDeviceCreateResponse,
-  PairDeviceConfirmResponse,
   ServiceStatusDto,
-} from "../../../../packages/shared-contracts/src";
+  PrinterInfo,
+} from "@shared/index";
+import {
+  pairDeviceCreate,
+  pairDeviceConfirm,
+  getServiceStatus,
+  getPrinters,
+} from "../lib/ipc";
+import { supabase, isSupabaseConfigured } from "../lib/supabaseClient";
 
 export default function DevicePairing() {
   const navigate = useNavigate();
   const { session } = useAuth();
 
   // Pairing State
-  const [pairingCode, setPairingCode] = useState<string>("842915");
+  const [pairingCode, setPairingCode] = useState<string>("------");
   const [expiresInSeconds, setExpiresInSeconds] = useState<number>(600);
   const [copied, setCopied] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
   const [manualCodeInput, setManualCodeInput] = useState<string>("");
-  const [showManualModal, setShowManualModal] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Shop Info from Supabase
+  const [shopName, setShopName] = useState<string>("My Print Shop");
+  const [shopSlug, setShopSlug] = useState<string>("my-print-shop");
+  const [discoveredPrinters, setDiscoveredPrinters] = useState<PrinterInfo[]>([]);
 
   // System & Service State
   const [serviceStatus, setServiceStatus] = useState<ServiceStatusDto>({
     isPaired: false,
-    realtimeConnected: true,
+    realtimeConnected: false,
     mockCloudMode: false,
     agentVersion: "2.4.1",
     queuedJobCount: 0,
-    deviceId: "DESKTOP-PRINT-01",
+    deviceId: undefined,
   });
 
   // Countdown timer for pairing key
@@ -44,54 +54,95 @@ export default function DevicePairing() {
     return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   };
 
+  // Load shop from Supabase and system state from IPC
+  useEffect(() => {
+    async function loadShopAndSystem() {
+      if (isSupabaseConfigured && session?.user) {
+        try {
+          const { data } = await supabase
+            .from("shops")
+            .select("name, slug")
+            .eq("owner_user_id", session.user.id)
+            .maybeSingle();
+          if (data?.name) setShopName(data.name);
+          if (data?.slug) setShopSlug(data.slug);
+        } catch (err) {
+          console.warn("Could not load shop details for pairing screen:", err);
+        }
+      }
+
+      try {
+        const [status, printers] = await Promise.all([
+          getServiceStatus(),
+          getPrinters().catch(() => []),
+        ]);
+        setServiceStatus(status);
+        setDiscoveredPrinters(printers);
+      } catch (err) {
+        console.warn("Could not fetch service status from agent:", err);
+      }
+    }
+    void loadShopAndSystem();
+  }, [session]);
+
   // Generate / Refresh Pairing Code via IPC or Edge Function
   const fetchPairingToken = useCallback(async () => {
+    if (!session?.access_token) {
+      setErrorMessage("Owner session token is missing. Please sign in again.");
+      return;
+    }
     setLoading(true);
     setErrorMessage(null);
     try {
-      if ((window as any).electron?.ipcRenderer) {
-        const ipc = (window as any).electron.ipcRenderer;
-        const res: { success: boolean; data?: PairDeviceCreateResponse; error?: string } =
-          await ipc.invoke("PairDeviceCreate", {
-            ownerAccessToken: session?.access_token || "local-dev-token",
-          });
+      const res = await pairDeviceCreate({
+        ownerAccessToken: session.access_token,
+      });
 
-        if (res?.success && res.data) {
-          setPairingCode(res.data.pairingCode);
-          setExpiresInSeconds(600);
+      if (res?.pairingCode) {
+        setPairingCode(res.pairingCode);
+        if (res.expiresAt) {
+          const diff = Math.max(
+            0,
+            Math.floor((new Date(res.expiresAt).getTime() - Date.now()) / 1000)
+          );
+          setExpiresInSeconds(diff || 600);
         }
       }
     } catch (err: any) {
-      console.warn("Using fallback local ephemeral pairing key:", err);
+      console.warn("Pairing token request error:", err);
+      setErrorMessage(err instanceof Error ? err.message : "Failed to generate pairing token.");
     } finally {
       setLoading(false);
     }
   }, [session]);
 
+  useEffect(() => {
+    void fetchPairingToken();
+  }, [fetchPairingToken]);
+
   // Copy code to clipboard
   const handleCopy = () => {
-    navigator.clipboard.writeText(pairingCode);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2500);
+    if (pairingCode && pairingCode !== "------") {
+      navigator.clipboard.writeText(pairingCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    }
   };
 
   // Confirm authorization and route to Fleet / Dashboard
   const handleConfirmPairing = async () => {
+    const codeToConfirm = (manualCodeInput || pairingCode).trim();
+    if (!codeToConfirm || codeToConfirm === "------") {
+      setErrorMessage("Please enter or generate a valid 6-digit pairing code.");
+      return;
+    }
     setLoading(true);
     setErrorMessage(null);
 
     try {
-      if ((window as any).electron?.ipcRenderer) {
-        const ipc = (window as any).electron.ipcRenderer;
-        const confirmRes: { success: boolean; data?: PairDeviceConfirmResponse; error?: string } =
-          await ipc.invoke("PairDeviceConfirm", {
-            pairingCode: manualCodeInput || pairingCode,
-          });
-
-        if (!confirmRes?.success && confirmRes?.error) {
-          throw new Error(confirmRes.error);
-        }
-      }
+      await pairDeviceConfirm({
+        pairingCode: codeToConfirm,
+      });
 
       // Navigate to Fleet Discovery & Dashboard upon successful handshake
       navigate("/printers");
@@ -217,12 +268,12 @@ export default function DevicePairing() {
                 {/* Digit Boxes */}
                 <div className="mt-4 flex items-center justify-center gap-2">
                   {pairingCode.split("").map((digit, idx) => (
-                    <React.Fragment key={idx}>
+                    <Fragment key={idx}>
                       <div className="flex h-13 w-10 sm:w-12 items-center justify-center rounded-xl border border-emerald-200 bg-emerald-50/40 text-xl sm:text-2xl font-black text-slate-900 shadow-2xs font-mono">
                         {digit}
                       </div>
                       {idx === 2 && <span className="text-slate-300 font-bold">•</span>}
-                    </React.Fragment>
+                    </Fragment>
                   ))}
                 </div>
 
@@ -332,9 +383,11 @@ export default function DevicePairing() {
                       <span className="text-2xl">🖥️</span>
                     </div>
                     <span className="mt-1.5 font-mono text-xs font-bold text-slate-800">
-                      DESKTOP-PRINT-01
+                      {serviceStatus?.deviceId ? `STATION-${serviceStatus.deviceId.substring(0, 8)}` : "DESKTOP-PRINT-01"}
                     </span>
-                    <span className="text-[10px] text-slate-400">Win 11 Pro • Kiosk v2.4</span>
+                    <span className="text-[10px] text-slate-400">
+                      {serviceStatus ? "Agent Connected • Kiosk Mode" : "Agent Offline"}
+                    </span>
                   </div>
 
                   {/* TOP-LEFT NODE: SHOP CLOUD STORE */}
@@ -343,8 +396,8 @@ export default function DevicePairing() {
                       🏪
                     </span>
                     <div>
-                      <p className="text-xs font-bold text-slate-800">My Print Shop</p>
-                      <p className="font-mono text-[10px] text-sky-600">smartprinter.in/s/my-print-shop</p>
+                      <p className="text-xs font-bold text-slate-800">{shopName || "My Print Shop"}</p>
+                      <p className="font-mono text-[10px] text-sky-600">{shopSlug ? `smartprinter.in/s/${shopSlug}` : "smartprinter.in/setup"}</p>
                     </div>
                   </div>
 
@@ -365,8 +418,14 @@ export default function DevicePairing() {
                       🖨️
                     </span>
                     <div>
-                      <p className="text-xs font-bold text-slate-800">Local Spooler Fleet (3 Online)</p>
-                      <p className="text-[10px] text-slate-400">Canon iR-ADV • HP LaserJet • Epson L805</p>
+                      <p className="text-xs font-bold text-slate-800">
+                        Local Spooler Fleet ({discoveredPrinters.length} Online)
+                      </p>
+                      <p className="text-[10px] text-slate-400">
+                        {discoveredPrinters.length > 0
+                          ? discoveredPrinters.slice(0, 3).map((p) => p.name).join(" • ")
+                          : "Scanning local printers..."}
+                      </p>
                     </div>
                   </div>
 
@@ -377,7 +436,7 @@ export default function DevicePairing() {
                     </span>
                     <div>
                       <p className="text-xs font-bold text-slate-800">Mobile Admin</p>
-                      <p className="text-[10px] text-purple-600">iPhone 15 Pro • BLE Proximity</p>
+                      <p className="text-[10px] text-purple-600">Shop Owner Pairing Link</p>
                     </div>
                   </div>
                 </div>
@@ -386,12 +445,16 @@ export default function DevicePairing() {
                 <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50/50 p-3">
                   <div className="flex items-center justify-between text-xs font-semibold text-slate-700 mb-1.5">
                     <span>DISCOVERED LOCAL HARDWARE VIA WIN32 SPOOLER</span>
-                    <span className="text-emerald-600">3 of 3 OPERATIONAL</span>
+                    <span className="text-emerald-600">{discoveredPrinters.length} of {discoveredPrinters.length} OPERATIONAL</span>
                   </div>
-                  <div className="grid grid-cols-3 gap-2 text-[11px] font-mono text-slate-500">
-                    <div className="truncate">● Canon C3530i (USB001)</div>
-                    <div className="truncate">● HP LaserJet 400 (192.168.1.14)</div>
-                    <div className="truncate">● Epson L805 Series (USB002)</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] font-mono text-slate-500">
+                    {discoveredPrinters.length > 0 ? (
+                      discoveredPrinters.slice(0, 3).map((p, idx) => (
+                        <div key={idx} className="truncate">● {p.name} ({p.portName || "Local"})</div>
+                      ))
+                    ) : (
+                      <div className="text-slate-400">No printers detected yet</div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -417,7 +480,7 @@ export default function DevicePairing() {
               <span className="h-2 w-2 rounded-full bg-emerald-500" />
               <span>
                 This binds your physical Windows print spooler to{" "}
-                <span className="font-bold text-slate-800">My Print Shop</span> (Verified Storefront).
+                <span className="font-bold text-slate-800">{shopName || "My Print Shop"}</span> (Verified Storefront).
               </span>
             </div>
 

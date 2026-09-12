@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type {
   PrinterInfo,
   PrintJobRecord,
   ServiceStatusDto,
-} from "../../../../packages/shared-contracts/src";
+} from "@shared/index";
 
 import {
   getServiceStatus,
@@ -313,8 +313,7 @@ export default function PrinterDiscovery() {
             </span>
 
             <span>
-              Desktop agent is running in local offline queue mode.
-              Jobs will buffer in SQLite until reconnect.
+              Desktop agent is running in local offline queue mode. Jobs will buffer in SQLite until reconnect.
             </span>
           </div>
 
@@ -343,11 +342,11 @@ export default function PrinterDiscovery() {
                 className={`inline-block h-2 w-2 rounded-full ${
                   serviceStatus.realtimeConnected
                     ? "bg-emerald-500"
-                    : "bg-emerald-600"
+                    : "bg-amber-500"
                 }`}
               />
 
-              Agent: v{serviceStatus.agentVersion || "2.4.1"}
+              Agent: {serviceStatus.agentVersion ? `v${serviceStatus.agentVersion}` : "Offline"}
 
               {serviceStatus.deviceId &&
                 ` (${serviceStatus.deviceId.slice(0, 8)})`}

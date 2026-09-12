@@ -1,6 +1,7 @@
-import React, { useState, useRef, type FormEvent, type ChangeEvent } from "react";
+import { useState, useRef, useEffect, type FormEvent, type ChangeEvent, type DragEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
+import { supabase, isSupabaseConfigured } from "../lib/supabaseClient";
 
 export default function ShopSetup() {
   const navigate = useNavigate();
@@ -15,6 +16,38 @@ export default function ShopSetup() {
   const [isDragging, setIsDragging] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Load existing shop and branch if already configured in Supabase
+  useEffect(() => {
+    async function loadExistingShop() {
+      if (!isSupabaseConfigured || !session?.user) return;
+      try {
+        const { data: shop } = await supabase
+          .from("shops")
+          .select("id, name, slug")
+          .eq("owner_user_id", session.user.id)
+          .maybeSingle();
+
+        if (shop) {
+          if (shop.name) setShopName(shop.name);
+          if (shop.slug) setSlug(shop.slug);
+
+          const { data: branch } = await supabase
+            .from("branches")
+            .select("address")
+            .eq("shop_id", shop.id)
+            .maybeSingle();
+
+          if (branch?.address) {
+            setShopAddress(branch.address);
+          }
+        }
+      } catch (err) {
+        console.warn("Could not prefetch shop details:", err);
+      }
+    }
+    void loadExistingShop();
+  }, [session]);
 
   // Slug generator helper
   function handleNameChange(e: ChangeEvent<HTMLInputElement>) {
@@ -43,7 +76,7 @@ export default function ShopSetup() {
     setPhotoPreview(objectUrl);
   }
 
-  function handleDrop(e: React.DragEvent<HTMLDivElement>) {
+  function handleDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault();
     setIsDragging(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
@@ -57,9 +90,79 @@ export default function ShopSetup() {
     setErrorMessage(null);
 
     try {
-      // In a full Supabase environment, this updates your shops profile table:
-      // await supabase.from('shops').insert({ name: shopName, address: shopAddress, slug: slug });
-      
+      if (isSupabaseConfigured && session?.user) {
+        // 1. Upsert shops table (schema: id, owner_user_id, name, slug, status)
+        const { data: existingShop } = await supabase
+          .from("shops")
+          .select("id")
+          .eq("owner_user_id", session.user.id)
+          .maybeSingle();
+
+        let shopId = existingShop?.id;
+        if (shopId) {
+          const { error: updateError } = await supabase
+            .from("shops")
+            .update({ name: shopName, slug })
+            .eq("id", shopId);
+          if (updateError) throw updateError;
+        } else {
+          const { data: newShop, error: insertError } = await supabase
+            .from("shops")
+            .insert({
+              owner_user_id: session.user.id,
+              name: shopName,
+              slug,
+              status: "active",
+            })
+            .select("id")
+            .single();
+          if (insertError) throw insertError;
+          shopId = newShop.id;
+        }
+
+        // 2. Upsert branches table (schema: id, shop_id, address, timezone)
+        if (shopId) {
+          const { data: existingBranch } = await supabase
+            .from("branches")
+            .select("id")
+            .eq("shop_id", shopId)
+            .maybeSingle();
+
+          if (existingBranch) {
+            await supabase
+              .from("branches")
+              .update({ address: shopAddress })
+              .eq("id", existingBranch.id);
+          } else {
+            await supabase.from("branches").insert({
+              shop_id: shopId,
+              address: shopAddress,
+              timezone: "Asia/Kolkata",
+            });
+          }
+
+          // 3. Upsert qr_codes table (schema: id, shop_id, slug, active)
+          const { data: existingQr } = await supabase
+            .from("qr_codes")
+            .select("id")
+            .eq("shop_id", shopId)
+            .maybeSingle();
+
+          if (existingQr) {
+            await supabase
+              .from("qr_codes")
+              .update({ slug, active: true })
+              .eq("id", existingQr.id);
+          } else {
+            await supabase.from("qr_codes").insert({
+              shop_id: shopId,
+              slug,
+              active: true,
+            });
+          }
+        }
+      }
+
       // Navigate to the next onboarding step (Device Pairing)
       navigate("/pairing");
     } catch (err: any) {

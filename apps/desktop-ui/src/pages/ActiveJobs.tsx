@@ -1,38 +1,26 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { Link } from "react-router-dom";
-import type { LocalJobStatus } from "@shared/index";
+import type { PrintJobRecord } from "@shared/index";
+import { getJobs } from "../lib/ipc";
 
-interface ExtendedJobUi {
-  printJobId: string;
-  idempotencyKey: string;
-  printerId: string;
-  printerName?: string;
-  storagePath: string;
-  status: LocalJobStatus;
-  optionsJson: string;
-  localFilePath?: string;
-  spoolerJobId?: number;
-  retryCount: number;
-  lastError?: string;
-  claimedAt?: string;
-  downloadedAt?: string;
-  printedAt?: string;
-  createdAt: string;
-  updatedAt: string;
-
-  // UI-only fields returned by the jobs payload when available.
-  documentTitle?: string;
+interface JobOptions {
+  copies?: number;
+  color?: boolean;
+  duplex?: boolean;
+  pages?: string;
   totalPages?: number;
-  printedPages?: number;
-  fileSizeBytes?: number;
-  downloadedBytes?: number;
+}
+
+function parseOptions(optionsJson: string): JobOptions {
+  try {
+    return JSON.parse(optionsJson || "{}");
+  } catch {
+    return {};
+  }
 }
 
 export default function ActiveJobs() {
-  // State bound directly to real IPC models
-  const [jobs, setJobs] = useState<ExtendedJobUi[]>([]);
-
-
+  const [jobs, setJobs] = useState<PrintJobRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
@@ -42,14 +30,9 @@ export default function ActiveJobs() {
   // Fetch jobs from Windows agent via named-pipe IPC
   const fetchJobs = useCallback(async () => {
     try {
-      if ((window as any).electron?.ipcRenderer) {
-        const ipc = (window as any).electron.ipcRenderer;
-        const res = await ipc.invoke("GetJobs");
-        if (res?.success && Array.isArray(res.data)) {
-          setJobs(res.data);
-        } else if (Array.isArray(res)) {
-          setJobs(res);
-        }
+      const data = await getJobs();
+      if (Array.isArray(data)) {
+        setJobs(data);
       }
     } catch (err) {
       console.warn("[ActiveJobs] IPC invocation failed, retaining buffer state:", err);
@@ -80,10 +63,11 @@ export default function ActiveJobs() {
   const filteredJobs = useMemo(() => {
     return jobs.filter((job) => {
       const q = searchQuery.toLowerCase().trim();
+      const docTitle = job.storagePath ? job.storagePath.split("/").pop()?.split("\\").pop() || "" : "";
       const matchesQuery =
         !q ||
         job.printJobId.toLowerCase().includes(q) ||
-        (job.documentTitle && job.documentTitle.toLowerCase().includes(q)) ||
+        docTitle.toLowerCase().includes(q) ||
         (job.printerName && job.printerName.toLowerCase().includes(q)) ||
         job.idempotencyKey.toLowerCase().includes(q);
 
@@ -106,8 +90,8 @@ export default function ActiveJobs() {
   const printingCount = jobs.filter((j) => j.status === "printing").length;
   const queuedCount = jobs.filter((j) => j.status === "queued" || j.status === "claimed").length;
   const downloadingCount = jobs.filter((j) => j.status === "downloading").length;
+  const downloadedCount = jobs.filter((j) => j.status === "downloaded").length;
 
-  // Use only values supplied by the real job payload. Never display demo values.
   const printerNames = useMemo(
     () =>
       Array.from(
@@ -119,20 +103,6 @@ export default function ActiveJobs() {
       ).sort((a, b) => a.localeCompare(b)),
     [jobs]
   );
-
-  const downloadedBufferBytes = useMemo(() => {
-    const values = jobs
-      .map((job) => job.downloadedBytes)
-      .filter((value): value is number => typeof value === "number" && value >= 0);
-
-    return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : null;
-  }, [jobs]);
-
-  const formatBytes = (bytes: number) => {
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-    return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
-  };
 
   return (
     <div className="flex-1 overflow-y-auto bg-[#faf8ff] p-5 lg:p-6 text-slate-800 font-sans select-none">
@@ -160,7 +130,7 @@ export default function ActiveJobs() {
           <button
             type="button"
             onClick={() => setQueuePaused(!queuePaused)}
-            className={`inline-flex items-center gap-1.5 rounded-lg border px-3.5 py-2 text-xs font-semibold shadow-xs transition ${
+            className={`inline-flex items-center gap-1.5 rounded-lg border px-3.5 py-2 text-xs font-semibold shadow-xs transition cursor-pointer ${
               queuePaused
                 ? "border-amber-300 bg-amber-50 text-amber-900"
                 : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
@@ -175,7 +145,7 @@ export default function ActiveJobs() {
               fetchJobs().finally(() => setLoading(false));
             }}
             disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white shadow-xs hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-50 transition"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white shadow-xs hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-50 transition cursor-pointer"
           >
             ↻ {loading ? "Resyncing..." : "Force Resync"}
           </button>
@@ -214,30 +184,26 @@ export default function ActiveJobs() {
         <div className="rounded-xl border border-slate-200/90 bg-white p-4 shadow-xs">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              Avg Throughput
+              Downloaded Buffer
             </span>
             <span className="text-base">⚡</span>
           </div>
-          <p className="mt-1 text-2xl font-bold text-slate-900">—</p>
-          <span className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-slate-400">
-            No throughput telemetry available
+          <p className="mt-1 text-2xl font-bold text-slate-900">{downloadedCount} Jobs</p>
+          <span className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-slate-500">
+            Payload stored locally
           </span>
         </div>
 
         <div className="rounded-xl border border-slate-200/90 bg-white p-4 shadow-xs">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              Local Temp Buffer
+              Downloading
             </span>
             <span className="text-base">📁</span>
           </div>
-          <p className="mt-1 text-2xl font-bold text-slate-900">
-            {downloadedBufferBytes !== null ? formatBytes(downloadedBufferBytes) : "—"}
-          </p>
-          <span className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-slate-400">
-            {downloadedBufferBytes !== null
-              ? "Downloaded bytes in active jobs"
-              : "No buffer telemetry available"}
+          <p className="mt-1 text-2xl font-bold text-slate-900">{downloadingCount} Jobs</p>
+          <span className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-slate-500">
+            Fetching from Storage
           </span>
         </div>
       </div>
@@ -268,7 +234,7 @@ export default function ActiveJobs() {
               key={tab.id}
               type="button"
               onClick={() => setStatusFilter(tab.id)}
-              className={`rounded px-3 py-1 transition ${
+              className={`rounded px-3 py-1 transition cursor-pointer ${
                 statusFilter === tab.id
                   ? "bg-emerald-600 text-white font-semibold shadow-2xs"
                   : "text-slate-600 hover:text-slate-900"
@@ -308,13 +274,8 @@ export default function ActiveJobs() {
             const isPrinting = job.status === "printing";
             const isQueued = job.status === "queued" || job.status === "claimed";
             const isDownloading = job.status === "downloading";
-
-            const percentComplete =
-              isPrinting && job.totalPages && job.printedPages
-                ? Math.round((job.printedPages / job.totalPages) * 100)
-                : isDownloading && job.fileSizeBytes && job.downloadedBytes
-                ? Math.round((job.downloadedBytes / job.fileSizeBytes) * 100)
-                : 0;
+            const options = parseOptions(job.optionsJson);
+            const docTitle = job.storagePath ? job.storagePath.split("/").pop()?.split("\\").pop() || "Document" : "Document";
 
             return (
               <div
@@ -339,10 +300,10 @@ export default function ActiveJobs() {
                     <div>
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-xs font-bold text-slate-500">
-                          #{job.printJobId}
+                          #{job.printJobId.slice(0, 8)}
                         </span>
                         <h2 className="text-sm font-bold text-slate-900">
-                          {job.documentTitle || job.storagePath.split("/").pop()}
+                          {docTitle}
                         </h2>
                         <span
                           className={`rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
@@ -363,6 +324,8 @@ export default function ActiveJobs() {
                         {job.spoolerJobId && (
                           <span> • Spooler Job ID: #{job.spoolerJobId}</span>
                         )}
+                        {options.copies && <span> • Copies: {options.copies}</span>}
+                        {options.color !== undefined && <span> • {options.color ? "Color" : "Mono"}</span>}
                         <span className="font-mono text-[11px] text-slate-400">
                           {" "}
                           • Key: {job.idempotencyKey.slice(0, 14)}...
@@ -377,7 +340,7 @@ export default function ActiveJobs() {
                       <button
                         type="button"
                         onClick={() => handlePromoteJob(job.printJobId)}
-                        className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 shadow-2xs"
+                        className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 shadow-2xs cursor-pointer"
                       >
                         Promote to Top
                       </button>
@@ -385,30 +348,28 @@ export default function ActiveJobs() {
                     <button
                       type="button"
                       onClick={() => handleCancelJob(job.printJobId)}
-                      className="rounded-lg border border-rose-200 bg-rose-50/40 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100 shadow-2xs transition"
+                      className="rounded-lg border border-rose-200 bg-rose-50/40 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100 shadow-2xs transition cursor-pointer"
                     >
                       Cancel Job
                     </button>
                   </div>
                 </div>
 
-                {/* Live Progress Bar for Printing / Downloading */}
+                {/* Progress indication */}
                 {(isPrinting || isDownloading) && (
                   <div className="mt-3">
                     <div className="flex items-center justify-between text-[11px] text-slate-500 mb-1">
                       <span>
                         {isPrinting
-                          ? `Streaming to Win32 Spooler (Page ${job.printedPages || 1} of ${job.totalPages})`
-                          : `Downloading encrypted PDF from Supabase Storage (${(job.downloadedBytes! / 1048576).toFixed(1)} MB / ${(job.fileSizeBytes! / 1048576).toFixed(1)} MB)`}
+                          ? `Streaming to Win32 Spooler (Spooler Job ID: #${job.spoolerJobId ?? "Pending"})`
+                          : "Downloading payload from Supabase Storage..."}
                       </span>
-                      <span className="font-mono font-bold text-slate-700">{percentComplete}%</span>
                     </div>
                     <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
                       <div
-                        className={`h-full transition-all duration-300 ${
-                          isPrinting ? "bg-emerald-600" : "bg-amber-500"
+                        className={`h-full animate-pulse ${
+                          isPrinting ? "bg-emerald-600 w-3/4" : "bg-amber-500 w-1/2"
                         }`}
-                        style={{ width: `${percentComplete}%` }}
                       />
                     </div>
                   </div>

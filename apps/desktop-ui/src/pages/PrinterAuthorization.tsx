@@ -4,7 +4,15 @@ import type {
   PrinterInfo,
   AuthorizePrinterRequest,
   ServiceStatusDto,
-} from "../../../../packages/shared-contracts/src";
+} from "@shared/index";
+import {
+  getPrinters,
+  getServiceStatus,
+  authorizePrinter,
+  getSettings,
+  updateSettings,
+} from "../lib/ipc";
+import { supabase } from "../lib/supabaseClient";
 
 interface PrinterAuthorizationUi extends PrinterInfo {
   isAuthorized?: boolean;
@@ -34,32 +42,50 @@ export default function PrinterAuthorization() {
   // 2. FETCH PRINTERS AND SERVICE STATUS VIA IPC
   const fetchPrinters = useCallback(async () => {
     try {
-      const ipc = (window as any).electron?.ipcRenderer;
-      if (!ipc) {
-        setPrinters([]);
-        setServiceStatus(null);
-        return;
-      }
-
-      const [printersRes, statusRes] = await Promise.all([
-        ipc.invoke("GetPrinters"),
-        ipc.invoke("GetServiceStatus"),
+      const [printersRes, statusRes, settingsRes] = await Promise.all([
+        getPrinters().catch(() => [] as PrinterInfo[]),
+        getServiceStatus().catch(() => null),
+        getSettings().catch(() => ({} as Record<string, string | null>)),
       ]);
 
-      if (printersRes?.success && Array.isArray(printersRes.data)) {
-        setPrinters(printersRes.data as PrinterAuthorizationUi[]);
-      } else if (Array.isArray(printersRes)) {
-        setPrinters(printersRes as PrinterAuthorizationUi[]);
-      } else {
-        setPrinters([]);
+      let cloudPrintersMap = new Map<string, boolean>();
+      if (statusRes?.isPaired && statusRes.deviceId) {
+        const { data: cpData } = await supabase
+          .from("printers")
+          .select("windows_printer_name, authorized")
+          .eq("device_id", statusRes.deviceId);
+        if (cpData) {
+          cpData.forEach((cp) => cloudPrintersMap.set(cp.windows_printer_name, cp.authorized));
+        }
       }
 
-      if (statusRes?.success && statusRes.data) {
-        setServiceStatus(statusRes.data as ServiceStatusDto);
-      } else if (statusRes?.data) {
-        setServiceStatus(statusRes.data as ServiceStatusDto);
-      } else {
-        setServiceStatus(null);
+      setPrinters(
+        printersRes.map((p) => ({
+          ...p,
+          isAuthorized: cloudPrintersMap.has(p.name) ? cloudPrintersMap.get(p.name) : false,
+          connectionType: p.portName?.toUpperCase().includes("USB")
+            ? "USB"
+            : p.portName?.toUpperCase().includes("IP") || p.portName?.includes(".")
+            ? "Network"
+            : "Virtual",
+          formats: ["PDF", "A4", p.supportsColor ? "Color" : "Mono", p.supportsDuplex ? "Duplex" : "Simplex"],
+        }))
+      );
+      setServiceStatus(statusRes);
+
+      if (settingsRes) {
+        if (settingsRes.defaultQuarantine !== undefined && settingsRes.defaultQuarantine !== null) {
+          setDefaultQuarantine(settingsRes.defaultQuarantine === "true");
+        }
+        if (settingsRes.allowUsbOverride !== undefined && settingsRes.allowUsbOverride !== null) {
+          setAllowUsbOverride(settingsRes.allowUsbOverride === "true");
+        }
+        if (settingsRes.autoPauseOnJam !== undefined && settingsRes.autoPauseOnJam !== null) {
+          setAutoPauseOnJam(settingsRes.autoPauseOnJam === "true");
+        }
+        if (settingsRes.spoolLimitMb) {
+          setSpoolLimitMb(settingsRes.spoolLimitMb);
+        }
       }
     } catch (err) {
       console.warn("Authorization IPC error:", err);
@@ -86,21 +112,21 @@ export default function PrinterAuthorization() {
     );
 
     try {
-      if ((window as any).electron?.ipcRenderer) {
-        const ipc = (window as any).electron.ipcRenderer;
-        const payload: AuthorizePrinterRequest = {
-          printerName,
-          authorized: newStatus,
-        };
-        const res = await ipc.invoke("AuthorizePrinter", payload);
-        if (res?.success) {
-          setSaveBanner(`Permissions updated: ${printerName} is now ${newStatus ? "Authorized" : "Blocked"}`);
-        } else {
-          setSaveBanner(`Notice: ${res?.error || "Spooler updated local policy state"}`);
-        }
-      } else {
-        setSaveBanner(`Policy updated for ${printerName} (${newStatus ? "Authorized" : "Blocked"})`);
+      const payload: AuthorizePrinterRequest = {
+        printerName,
+        authorized: newStatus,
+      };
+      await authorizePrinter(payload);
+
+      if (serviceStatus?.deviceId) {
+        await supabase
+          .from("printers")
+          .update({ authorized: newStatus, updated_at: new Date().toISOString() })
+          .eq("device_id", serviceStatus.deviceId)
+          .eq("windows_printer_name", printerName);
       }
+
+      setSaveBanner(`Permissions updated: ${printerName} is now ${newStatus ? "Authorized" : "Blocked"}`);
     } catch (err: any) {
       setSaveBanner(err?.message || "Failed to update authorization");
     } finally {
@@ -179,24 +205,15 @@ export default function PrinterAuthorization() {
             onClick={async () => {
               setSaving(true);
               try {
-                const ipc = (window as any).electron?.ipcRenderer;
-                if (!ipc) {
-                  setSaveBanner("Permission saving is available only in the desktop agent.");
-                  return;
-                }
-
-                const res = await ipc.invoke("SavePrinterPolicies", {
-                  defaultQuarantine,
-                  allowUsbOverride,
-                  autoPauseOnJam,
-                  spoolLimitMb,
+                await updateSettings({
+                  settings: {
+                    defaultQuarantine: String(defaultQuarantine),
+                    allowUsbOverride: String(allowUsbOverride),
+                    autoPauseOnJam: String(autoPauseOnJam),
+                    spoolLimitMb,
+                  },
                 });
-
-                setSaveBanner(
-                  res?.success
-                    ? "Printer permissions saved."
-                    : res?.error || "Unable to save printer permissions."
-                );
+                setSaveBanner("Printer workstation policies saved successfully.");
               } catch (err) {
                 setSaveBanner(
                   err instanceof Error ? err.message : "Unable to save printer permissions."
@@ -545,20 +562,12 @@ export default function PrinterAuthorization() {
             type="button"
             onClick={async () => {
               try {
-                const ipc = (window as any).electron?.ipcRenderer;
-                if (!ipc) {
-                  setSaveBanner("Machine keypair management is available only in the desktop agent.");
-                  return;
-                }
-                const res = await ipc.invoke("RegenerateMachineKeypair");
-                setSaveBanner(
-                  res?.success
-                    ? "Machine keypair regenerated."
-                    : res?.error || "Unable to regenerate machine keypair."
-                );
+                const status = await getServiceStatus();
+                setServiceStatus(status);
+                setSaveBanner("Hardware attestation and service status refreshed.");
               } catch (err) {
                 setSaveBanner(
-                  err instanceof Error ? err.message : "Unable to regenerate machine keypair."
+                  err instanceof Error ? err.message : "Unable to refresh hardware status."
                 );
               } finally {
                 setTimeout(() => setSaveBanner(null), 4000);
@@ -566,7 +575,7 @@ export default function PrinterAuthorization() {
             }}
             className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition cursor-pointer"
           >
-            ↻ Re-generate Machine Keypair
+            ↻ Refresh Hardware Attestation
           </button>
         </div>
       </div>
@@ -576,14 +585,12 @@ export default function PrinterAuthorization() {
         <div className="flex items-center gap-2">
           <span>🖨️</span>
           <span className="font-mono text-[11px]">
-            Win32 Policy Hook: <strong>{(serviceStatus as any)?.pipeName || "—"}</strong> • IPC Handshake: <strong className="text-emerald-600">{serviceStatus?.isPaired ? "OK" : "Unavailable"}</strong>
+            Device ID: <strong>{serviceStatus?.deviceId || "—"}</strong> • IPC Handshake: <strong className="text-emerald-600">{serviceStatus ? "Connected" : "Unavailable"}</strong>
           </span>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-slate-400 text-[11px]">
-            {(serviceStatus as any)?.lastPolicyCommitAt
-              ? <>Last policy commit: <strong>{new Date((serviceStatus as any).lastPolicyCommitAt).toLocaleString()}</strong></>
-              : "Last policy commit: unavailable"}
+            Realtime Sync: <strong className={serviceStatus?.realtimeConnected ? "text-emerald-600" : "text-slate-500"}>{serviceStatus?.realtimeConnected ? "Connected" : "Offline"}</strong>
           </span>
           <Link to="/diagnostics" className="font-semibold text-emerald-700 hover:underline">
             View Authorization Audit Logs →
