@@ -6,6 +6,7 @@ using SmartPrinter.Agent.Data;
 using SmartPrinter.Agent.Data.Models;
 using SmartPrinter.Agent.Printing;
 using SmartPrinter.Agent.Printing.Models;
+using System.Text.Json.Serialization;
 
 namespace SmartPrinter.Agent.Ipc;
 
@@ -260,6 +261,20 @@ public sealed class IpcRouter
         return new { status = outcome.Status.ToString(), error = outcome.ErrorMessage };
     }
 
-    private static T? Deserialize<T>(JsonElement? element) =>
-        element.HasValue ? JsonSerializer.Deserialize<T>(element.Value.GetRawText()) : default;
+    private static readonly JsonSerializerOptions JsonOptions = new()
+{
+    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    PropertyNameCaseInsensitive = true,
+    Converters =
+    {
+        new JsonStringEnumConverter()
+    }
+};
+
+private static T? Deserialize<T>(JsonElement? element) =>
+    element.HasValue
+        ? JsonSerializer.Deserialize<T>(
+            element.Value.GetRawText(),
+            JsonOptions)
+        : default;
 }

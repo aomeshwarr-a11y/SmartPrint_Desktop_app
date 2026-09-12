@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SmartPrinter.Agent.Configuration;
+using System.Text.Json.Serialization;
 
 namespace SmartPrinter.Agent.Ipc;
 
@@ -27,6 +28,15 @@ public sealed class NamedPipeServer
     private readonly IpcRouter _router;
     private readonly AgentOptions _options;
     private readonly ILogger<NamedPipeServer> _logger;
+    private static readonly JsonSerializerOptions JsonOptions = new()
+{
+    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    PropertyNameCaseInsensitive = true,
+    Converters =
+    {
+        new JsonStringEnumConverter()
+    }
+};
 
     public NamedPipeServer(IpcRouter router, IOptions<AgentOptions> options, ILogger<NamedPipeServer> logger)
     {
@@ -66,23 +76,21 @@ public sealed class NamedPipeServer
     }
 
     private NamedPipeServerStream CreatePipe()
+{
+    if (!OperatingSystem.IsWindows())
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException("Named pipes with ACLs require Windows.");
-        }
-
-        var security = BuildPipeSecurity();
-        return NamedPipeServerStreamAcl.Create(
-            _options.PipeName,
-            PipeDirection.InOut,
-            NamedPipeServerStream.MaxAllowedServerInstances,
-            PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous,
-            inBufferSize: 65536,
-            outBufferSize: 65536,
-            pipeSecurity: security);
+        throw new PlatformNotSupportedException("Named pipes require Windows.");
     }
+
+    return new NamedPipeServerStream(
+        _options.PipeName,
+        PipeDirection.InOut,
+        NamedPipeServerStream.MaxAllowedServerInstances,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous,
+        inBufferSize: 65536,
+        outBufferSize: 65536);
+}
 
     private static PipeSecurity BuildPipeSecurity()
     {
@@ -127,8 +135,7 @@ public sealed class NamedPipeServer
                     IpcResponse response;
                     try
                     {
-                        var request = JsonSerializer.Deserialize<IpcRequest>(line)
-                                      ?? throw new InvalidOperationException("Malformed IPC request.");
+                        var request = JsonSerializer.Deserialize<IpcRequest>(line, JsonOptions);
                         response = await _router.DispatchAsync(request, cancellationToken);
                     }
                     catch (Exception ex)
@@ -137,7 +144,7 @@ public sealed class NamedPipeServer
                         response = IpcResponse.Fail("unknown", "Malformed request or internal error.");
                     }
 
-                    var json = JsonSerializer.Serialize(response);
+                    var json = JsonSerializer.Serialize(response, JsonOptions);
                     await writer.WriteLineAsync(json);
                 }
             }

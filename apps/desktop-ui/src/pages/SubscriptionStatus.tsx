@@ -75,14 +75,14 @@ export default function SubscriptionStatus() {
       <div className="grid grid-cols-2 gap-4">
         <div className="card">
           <p className="text-sm font-medium text-brand-900">Monthly</p>
-          <p className="mb-4 text-2xl font-semibold text-brand-900">₹999<span className="text-sm font-normal text-brand-500">/mo</span></p>
+          <p className="mb-4 text-2xl font-semibold text-brand-900">₹1<span className="text-sm font-normal text-brand-500">/mo</span></p>
           <button className="btn-primary w-full" disabled={starting} onClick={() => startCheckout("monthly")}>
             Choose monthly
           </button>
         </div>
         <div className="card border-brand-500">
           <p className="text-sm font-medium text-brand-900">Yearly (save 2 months)</p>
-          <p className="mb-4 text-2xl font-semibold text-brand-900">₹9990<span className="text-sm font-normal text-brand-500">/yr</span></p>
+          <p className="mb-4 text-2xl font-semibold text-brand-900">₹10<span className="text-sm font-normal text-brand-500">/yr</span></p>
           <button className="btn-primary w-full" disabled={starting} onClick={() => startCheckout("yearly")}>
             Choose yearly
           </button>

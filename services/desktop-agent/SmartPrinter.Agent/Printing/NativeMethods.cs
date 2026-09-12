@@ -15,32 +15,56 @@ internal static class NativeMethods
     internal const int PRINTER_ENUM_LOCAL = 0x00000002;
     internal const int PRINTER_ENUM_CONNECTIONS = 0x00000004;
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    internal struct PRINTER_INFO_2
-    {
-        public string? pServerName;
-        public string? pPrinterName;
-        public string? pShareName;
-        public string? pPortName;
-        public string? pDriverName;
-        public string? pComment;
-        public string? pLocation;
-        public IntPtr pDevMode;
-        public string? pSepFile;
-        public string? pPrintProcessor;
-        public string? pDatatype;
-        public string? pParameters;
-        public IntPtr pSecurityDescriptor;
-        public uint Attributes;
-        public uint Priority;
-        public uint DefaultPriority;
-        public uint StartTime;
-        public uint UntilTime;
-        public uint Status;
-        public uint cJobs;
-        public uint AveragePPM;
-    }
+    
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+internal struct PRINTER_INFO_2
+{
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? pServerName;
 
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? pPrinterName;
+
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? pShareName;
+
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? pPortName;
+
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? pDriverName;
+
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? pComment;
+
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? pLocation;
+
+    public IntPtr pDevMode;
+
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? pSepFile;
+
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? pPrintProcessor;
+
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? pDatatype;
+
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? pParameters;
+
+    public IntPtr pSecurityDescriptor;
+
+    public uint Attributes;
+    public uint Priority;
+    public uint DefaultPriority;
+    public uint StartTime;
+    public uint UntilTime;
+    public uint Status;
+    public uint cJobs;
+    public uint AveragePPM;
+}
     // Printer status bit flags (subset of the documented PRINTER_STATUS_* constants).
     internal const uint PRINTER_STATUS_PAUSED = 0x00000001;
     internal const uint PRINTER_STATUS_ERROR = 0x00000002;

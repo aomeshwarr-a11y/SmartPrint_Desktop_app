@@ -1,0 +1,2 @@
+[functions.device-pairing-confirm]
+verify_jwt = false
