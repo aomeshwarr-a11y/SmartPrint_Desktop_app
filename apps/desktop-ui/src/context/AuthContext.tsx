@@ -1,4 +1,10 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabaseClient";
 
@@ -19,12 +25,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let isMounted = true;
 
-    // Listen to Supabase auth state change events:
-    // - INITIAL_SESSION: Emitted when the stored session is loaded from storage.
-    // - SIGNED_IN: Emitted on successful sign in or session restoration.
-    // - SIGNED_OUT: Emitted when explicitly signed out or token refresh fails.
-    // - TOKEN_REFRESHED: Emitted when the session access token is automatically refreshed.
-    // - USER_UPDATED: Emitted when user data changes.
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, newSession) => {
@@ -35,50 +35,63 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setSession(newSession);
           setLoading(false);
           break;
+
         case "SIGNED_IN":
           setSession(newSession);
           setLoading(false);
           break;
+
         case "SIGNED_OUT":
           setSession(null);
           setLoading(false);
           break;
+
         case "TOKEN_REFRESHED":
           setSession(newSession);
           break;
+
         case "USER_UPDATED":
           setSession(newSession);
           break;
+
         default:
           setSession(newSession);
           break;
       }
     });
 
-    // Also explicitly query getSession() to ensure we resolve even if INITIAL_SESSION
-    // was emitted prior to subscription or in edge cases.
     supabase.auth
       .getSession()
       .then(({ data, error }) => {
         if (!isMounted) return;
+
         if (error) {
-          console.error("Failed to restore Supabase auth session:", error);
+          console.error(
+            "Failed to restore Supabase auth session:",
+            error
+          );
+
           setSession(null);
         } else if (data?.session) {
           setSession(data.session);
         }
+
         setLoading(false);
       })
       .catch((err) => {
         if (!isMounted) return;
-        console.error("Unexpected error restoring Supabase auth session:", err);
+
+        console.error(
+          "Unexpected error restoring Supabase auth session:",
+          err
+        );
+
         setSession(null);
         setLoading(false);
       });
 
-    // Fallback safety timeout so UI never hangs indefinitely during session restoration
     const safetyTimeout = setTimeout(() => {
-      if (isMounted && loading) {
+      if (isMounted) {
         setLoading(false);
       }
     }, 4000);
@@ -91,26 +104,81 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   async function signIn(email: string, password: string) {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) throw error;
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email: normalizedEmail,
+      password,
+    });
+
+    if (error) {
+      throw error;
+    }
   }
 
   async function signUp(email: string, password: string) {
-    const { error } = await supabase.auth.signUp({ email, password });
-    if (error) throw error;
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const { data, error } = await supabase.auth.signUp({
+      email: normalizedEmail,
+      password,
+    });
+
+    if (error) {
+      throw error;
+    }
+
+    /*
+     * Supabase may intentionally return no error when the email
+     * already belongs to an existing confirmed account.
+     *
+     * An empty identities array indicates that this is not a
+     * newly-created identity.
+     */
+    if (data.user && data.user.identities?.length === 0) {
+      throw new Error(
+        "An account with this email already exists. Please log in."
+      );
+    }
+
+    if (!data.user) {
+      throw new Error(
+        "Could not create account. Please try again."
+      );
+    }
   }
 
   async function signOut() {
-    await supabase.auth.signOut();
+    const { error } = await supabase.auth.signOut();
+
+    if (error) {
+      throw error;
+    }
   }
 
   return (
-    <AuthContext.Provider value={{ session, loading, signIn, signUp, signOut }}>{children}</AuthContext.Provider>
+    <AuthContext.Provider
+      value={{
+        session,
+        loading,
+        signIn,
+        signUp,
+        signOut,
+      }}
+    >
+      {children}
+    </AuthContext.Provider>
   );
 }
 
 export function useAuth(): AuthContextValue {
   const context = useContext(AuthContext);
-  if (!context) throw new Error("useAuth must be used within an AuthProvider.");
+
+  if (!context) {
+    throw new Error(
+      "useAuth must be used within an AuthProvider."
+    );
+  }
+
   return context;
 }

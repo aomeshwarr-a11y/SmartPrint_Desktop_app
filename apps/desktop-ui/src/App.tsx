@@ -38,7 +38,7 @@ function AuthLoadingScreen() {
  * Start Electron -> Initialize Supabase -> Restore authentication session -> Check authentication state
  * Valid session?
  *   YES -> Dashboard
- *   NO  -> Sign In (/login)
+ *   NO  -> Welcome (/welcome)
  */
 function InitialAuthRoute() {
   const { session, loading } = useAuth();
@@ -51,7 +51,7 @@ function InitialAuthRoute() {
     return <Navigate to="/dashboard" replace />;
   }
 
-  return <Navigate to="/login" replace />;
+  return <Navigate to="/welcome" replace />;
 }
 
 function RequireAuth({ children }: { children: JSX.Element }) {
