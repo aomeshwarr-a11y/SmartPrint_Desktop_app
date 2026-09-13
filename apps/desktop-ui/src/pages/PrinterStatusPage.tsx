@@ -364,7 +364,9 @@ export default function PrinterStatusPage() {
                               const parsed = JSON.parse(j.optionsJson);
                               return parsed.printerName === printer.name;
                             }
-                          } catch {}
+                          } catch {
+                            // ignore json parse errors
+                          }
                           return false;
                         }).length} jobs
                       </span>

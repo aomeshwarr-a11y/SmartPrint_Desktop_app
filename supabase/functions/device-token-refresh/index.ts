@@ -51,7 +51,7 @@ Deno.serve(async (req: Request) => {
       return json({ error: "Invalid or revoked device credential." }, 401);
     }
 
-    const jwtSecret = Deno.env.get("SUPABASE_JWT_SECRET");
+    const jwtSecret = Deno.env.get("SMARTPRINTER_JWT_SECRET");
     if (!jwtSecret) {
       console.error("SUPABASE_JWT_SECRET is not configured for this Edge Function.");
       return json({ error: "Server misconfiguration." }, 500);
@@ -70,7 +70,7 @@ Deno.serve(async (req: Request) => {
       {
         role: "authenticated",
         device_id: deviceId,
-        sub: `device:${deviceId}`,
+        sub: deviceId,
         exp: getNumericDate(ACCESS_TOKEN_TTL_SECONDS),
       },
       key,

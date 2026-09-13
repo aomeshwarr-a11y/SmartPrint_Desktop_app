@@ -1,14 +1,13 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import type { ServiceStatusDto } from "@shared/index";
 import {
   getSettings,
   updateSettings,
   restartAgent,
   exportDiagnostics,
-  getServiceStatus,
 } from "../lib/ipc";
 import { useAuth } from "../context/AuthContext";
+import { useAgentStatus } from "../context/AgentStatusContext";
 import { supabase } from "../lib/supabaseClient";
 
 interface SettingsState {
@@ -33,7 +32,15 @@ interface SettingsState {
 export default function Settings() {
   const navigate = useNavigate();
   const { session } = useAuth();
-  const [serviceStatus, setServiceStatus] = useState<ServiceStatusDto | null>(null);
+  const {
+    isOnline,
+    isRestarting: isAgentRestarting,
+    isStarting,
+    status: serviceStatus,
+    statusText,
+    refresh: refreshAgentHealth,
+  } = useAgentStatus();
+
   const [shopId, setShopId] = useState<string>("");
 
   const [settings, setSettings] = useState<SettingsState>({
@@ -64,14 +71,7 @@ export default function Settings() {
   useEffect(() => {
     async function loadSettings() {
       try {
-        const [settingsRes, statusRes] = await Promise.all([
-          getSettings().catch(() => ({} as Record<string, string | null>)),
-          getServiceStatus().catch(() => null),
-        ]);
-
-        if (statusRes) {
-          setServiceStatus(statusRes);
-        }
+        const settingsRes = await getSettings().catch(() => ({} as Record<string, string | null>));
 
         if (settingsRes && Object.keys(settingsRes).length > 0) {
           setSettings((prev) => ({
@@ -93,10 +93,10 @@ export default function Settings() {
             showTariffOnQr: settingsRes.showTariffOnQr ? settingsRes.showTariffOnQr === "true" : prev.showTariffOnQr,
             offlineBufferEnabled: settingsRes.offlineBufferEnabled ? settingsRes.offlineBufferEnabled === "true" : prev.offlineBufferEnabled,
           }));
-        } else if (statusRes) {
+        } else if (serviceStatus) {
           setSettings((prev) => ({
             ...prev,
-            workstationName: statusRes.deviceId ? `STATION-${statusRes.deviceId.slice(0, 8)}` : prev.workstationName,
+            workstationName: serviceStatus.deviceId ? `STATION-${serviceStatus.deviceId.slice(0, 8)}` : prev.workstationName,
           }));
         }
       } catch (err) {
@@ -104,7 +104,7 @@ export default function Settings() {
       }
     }
     void loadSettings();
-  }, []);
+  }, [serviceStatus]);
 
   useEffect(() => {
     async function loadShop() {
@@ -165,17 +165,16 @@ export default function Settings() {
   };
 
   const handleRestartService = async () => {
-    if (restarting) return;
+    if (restarting || isAgentRestarting) return;
     setRestarting(true);
     setFeedbackNotice("Restarting SmartPrinter Agent service — waiting for confirmed reconnection...");
     try {
       const result = await restartAgent();
       if (result.success) {
         setFeedbackNotice("SmartPrinter Agent restarted successfully. Reconnected to named pipe.");
-        const status = await getServiceStatus().catch(() => null);
-        setServiceStatus(status);
+        await refreshAgentHealth();
       } else {
-        setFeedbackNotice(`Failed to restart agent service: ${result.error ?? "Process did not start."}`);
+        setFeedbackNotice(`Agent Offline / Restart Failed: ${result.error ?? "Process did not start."}`);
       }
     } catch (err: any) {
       setFeedbackNotice(err?.message || "Failed to restart agent service.");
@@ -207,9 +206,15 @@ export default function Settings() {
             <span>/</span>
             <span>System &amp; Workstation Configuration</span>
             <span>•</span>
-            <span className="flex items-center gap-1 font-semibold text-emerald-700">
-              <span className={`h-1.5 w-1.5 rounded-full ${serviceStatus ? "bg-emerald-500 animate-pulse" : "bg-rose-500"}`} />
-              Agent {serviceStatus?.agentVersion ? `v${serviceStatus.agentVersion}` : "v2.0"} {serviceStatus ? "CONNECTED" : "DISCONNECTED"}
+            <span className="flex items-center gap-1 font-semibold text-slate-700">
+              <span className={`h-1.5 w-1.5 rounded-full ${
+                isOnline
+                  ? "bg-emerald-500 animate-pulse"
+                  : isAgentRestarting || isStarting
+                  ? "bg-amber-500 animate-pulse"
+                  : "bg-rose-500"
+              }`} />
+              Agent {isOnline ? `v${serviceStatus?.agentVersion ?? "2.0"} ONLINE` : statusText}
             </span>
           </div>
           <h1 className="text-xl font-bold tracking-tight text-slate-900 lg:text-2xl">
@@ -224,10 +229,10 @@ export default function Settings() {
           <button
             type="button"
             onClick={handleRestartService}
-            disabled={restarting}
+            disabled={restarting || isAgentRestarting}
             className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 shadow-2xs hover:bg-slate-50 transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
           >
-            🔄 {restarting ? "Restarting Agent..." : "Restart Win32 Agent"}
+            🔄 {restarting || isAgentRestarting ? "Restarting Agent..." : "Restart Win32 Agent"}
           </button>
           <button
             type="button"

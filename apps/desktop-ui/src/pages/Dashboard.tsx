@@ -1,15 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
+import { useAgentStatus } from "../context/AgentStatusContext";
 import {
   getPrinters,
   getQueue,
-  getServiceStatus,
 } from "../lib/ipc";
 import type {
   PrinterInfo,
   PrintJobRecord,
-  ServiceStatusDto,
 } from "@shared/index";
 
 /* -------------------------------------------------------------------------- */
@@ -164,14 +163,28 @@ export default function Dashboard() {
   const [printers, setPrinters] = useState<DashboardPrinter[]>([]);
   const [jobs, setJobs] = useState<PrintJobRecord[]>([]);
 
-  const [agent, setAgent] = useState<AgentState>({
-    isConnected: false,
-    realtimeConnected: false,
-    mockCloudMode: false,
-    queuedJobCount: 0,
-  });
+  const {
+    isOnline,
+    isRestarting,
+    isStarting,
+    status: serviceStatus,
+    statusText,
+    error: agentError,
+    refresh: refreshAgentHealth,
+  } = useAgentStatus();
 
-  const [loading, setLoading] = useState(true);
+  const agent: AgentState = useMemo(
+    () => ({
+      isConnected: isOnline,
+      version: serviceStatus?.agentVersion,
+      realtimeConnected: serviceStatus?.realtimeConnected ?? false,
+      mockCloudMode: serviceStatus?.mockCloudMode ?? false,
+      queuedJobCount: serviceStatus?.queuedJobCount ?? 0,
+    }),
+    [isOnline, serviceStatus]
+  );
+
+  const [loading, setLoading] = useState(false);
 
   const [filter, setFilter] = useState<
     "ALL" | "PRINTING" | "IDLE" | "ATTENTION"
@@ -180,109 +193,79 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
 
   /* ------------------------------------------------------------------------ */
-  /* Refresh real data                                                        */
+  /* Refresh printer hardware & queue (separated from agent health checks)    */
   /* ------------------------------------------------------------------------ */
 
   const refreshData = useCallback(async () => {
+    if (!isOnline) {
+      setPrinters([]);
+      setJobs([]);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
     try {
-      /*
-       * These calls all go through:
-       *
-       * React
-       *   -> src/lib/ipc.ts
-       *   -> window.smartprinter.callAgent()
-       *   -> Electron preload
-       *   -> agent:call
-       *   -> named pipe
-       *   -> SmartPrinter.Agent
-       *
-       * This is the correct IPC path for the current application.
-       */
+      const [discoveredPrinters, queue] = await Promise.all([
+        getPrinters().catch(() => [] as PrinterInfo[]),
+        getQueue().catch(() => [] as PrintJobRecord[]),
+      ]);
 
-      const [serviceStatus, discoveredPrinters, queue] =
-        await Promise.all([
-          getServiceStatus(),
-          getPrinters(),
-          getQueue(),
-        ]);
-
-      const status: ServiceStatusDto = serviceStatus;
-
-      /*
-       * A successful IPC response proves that the local agent is reachable.
-       * realtimeConnected is kept separate because cloud realtime connectivity
-       * is not the same thing as local Electron <-> Agent connectivity.
-       */
-      setAgent({
-        isConnected: true,
-        version: status.agentVersion,
-        realtimeConnected: status.realtimeConnected,
-        mockCloudMode: status.mockCloudMode,
-        queuedJobCount: status.queuedJobCount,
-      });
-
-      /*
-       * Map the real shared PrinterInfo contract into the small shape used
-       * by this Dashboard.
-       */
-      const mappedPrinters: DashboardPrinter[] =
-        discoveredPrinters.map((printer) => ({
+      const mappedPrinters: DashboardPrinter[] = discoveredPrinters.map(
+        (printer) => ({
           name: printer.name,
           driverName: printer.driverName,
           portName: printer.portName,
           isDefault: printer.isDefault,
           availability: printer.availability,
           fingerprint: printer.fingerprint,
-        }));
-
-      setPrinters(mappedPrinters);
-
-      /*
-       * GetQueue() returns the actual PrintJobRecord[] contract.
-       */
-      setJobs(queue);
-    } catch (err) {
-      console.error(
-        "Failed to query SmartPrinter Agent:",
-        err
+        })
       );
 
-      /*
-       * If IPC fails, the agent is genuinely unreachable from the UI.
-       */
-      setAgent((previous) => ({
-        ...previous,
-        isConnected: false,
-      }));
-
+      setPrinters(mappedPrinters);
+      setJobs(queue);
+    } catch (err) {
+      console.error("Failed to query SmartPrinter Agent hardware:", err);
       setError(
         err instanceof Error
           ? err.message
-          : "Unable to communicate with SmartPrinter Agent."
+          : "Unable to query printer hardware."
       );
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isOnline]);
 
   /* ------------------------------------------------------------------------ */
-  /* Initial load + polling                                                   */
+  /* Initial load when agent is online + lightweight queue refresh           */
   /* ------------------------------------------------------------------------ */
 
   useEffect(() => {
-    void refreshData();
+    if (isOnline) {
+      void refreshData();
+    } else {
+      setPrinters([]);
+      setJobs([]);
+      setLoading(false);
+    }
+  }, [isOnline, refreshData]);
+
+  // Lightweight queue polling: does NOT trigger Windows printer discovery
+  useEffect(() => {
+    if (!isOnline) return;
 
     const interval = window.setInterval(() => {
-      void refreshData();
+      getQueue()
+        .then((queue) => setJobs(queue))
+        .catch(() => {});
     }, 5000);
 
     return () => {
       window.clearInterval(interval);
     };
-  }, [refreshData]);
+  }, [isOnline]);
 
   /* ------------------------------------------------------------------------ */
   /* Derived values                                                           */
@@ -391,20 +374,23 @@ export default function Dashboard() {
       {/* Communication error                                                */}
       {/* ------------------------------------------------------------------ */}
 
-      {error && (
+      {(error || (!isOnline && !isRestarting && !isStarting)) && (
         <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 shadow-sm">
           <div>
             <span className="font-semibold">
-              SmartPrinter Agent unavailable:
+              SmartPrinter Agent Offline / Not Running:
             </span>{" "}
-            {error}
+            {error || agentError || "SmartPrinter.Agent is not running or unreachable."}
           </div>
 
           <button
             type="button"
-            onClick={() => void refreshData()}
+            onClick={() => {
+              void refreshAgentHealth();
+              void refreshData();
+            }}
             disabled={loading}
-            className="rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+            className="rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50 cursor-pointer"
           >
             Retry
           </button>
@@ -458,18 +444,17 @@ export default function Dashboard() {
             <span className="flex items-center gap-1.5">
               <span
                 className={`inline-block h-2 w-2 rounded-full ${
-                  agent.isConnected
+                  isOnline
                     ? "bg-emerald-500"
+                    : isRestarting || isStarting
+                    ? "bg-amber-500 animate-pulse"
                     : "bg-rose-500"
                 }`}
               />
 
-              Agent{" "}
-              {agent.isConnected
-                ? "Connected"
-                : "Disconnected"}
+              {isOnline ? "Agent Online" : statusText}
 
-              {agent.version && (
+              {isOnline && agent.version && (
                 <span className="font-mono text-[11px]">
                   · {agent.version}
                 </span>
@@ -596,16 +581,22 @@ export default function Dashboard() {
             <div className="flex items-center gap-2">
               <span
                 className={`inline-block h-2.5 w-2.5 rounded-full ${
-                  agent.isConnected
+                  isOnline
                     ? "bg-emerald-500"
+                    : isRestarting || isStarting
+                    ? "bg-amber-500 animate-pulse"
                     : "bg-rose-500"
                 }`}
               />
 
               <span className="text-base font-bold text-slate-900">
-                {agent.isConnected
+                {isOnline
                   ? "Active"
-                  : "Offline"}
+                  : isRestarting
+                  ? "Restarting"
+                  : isStarting
+                  ? "Connecting"
+                  : "Offline / Not Running"}
               </span>
             </div>
 

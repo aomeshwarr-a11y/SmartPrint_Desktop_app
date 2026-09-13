@@ -11,5 +11,5 @@
     "resolveJsonModule": true,
     "types": ["node"]
   },
-  "include": ["main.ts", "preload.ts", "pipeClient.ts"]
+  "include": ["**/*.ts"]
 }

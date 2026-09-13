@@ -48,7 +48,7 @@ export default function PrinterAuthorization() {
         getSettings().catch(() => ({} as Record<string, string | null>)),
       ]);
 
-      let cloudPrintersMap = new Map<string, boolean>();
+      const cloudPrintersMap = new Map<string, boolean>();
       if (statusRes?.isPaired && statusRes.deviceId) {
         const { data: cpData } = await supabase
           .from("printers")

@@ -64,6 +64,13 @@ function tryOpenExternal(url: string): void {
 app.whenReady().then(() => {
   createWindow();
 
+  agentProcessManager.setStatusBroadcaster((status) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("agent:status-changed", status);
+    }
+  });
+  agentProcessManager.startMonitoring();
+
   if (!isDev) {
     autoUpdater.checkForUpdatesAndNotify().catch((err) => {
       console.error("Auto-update check failed:", err);
@@ -73,6 +80,10 @@ app.whenReady().then(() => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on("before-quit", () => {
+  agentProcessManager.stopMonitoring();
 });
 
 app.on("window-all-closed", () => {
@@ -99,6 +110,14 @@ ipcMain.handle("agent:restart", async () => {
   return agentProcessManager.restartAgent();
 });
 
+ipcMain.handle("agent:get-health", () => {
+  return agentProcessManager.getHealthStatus();
+});
+
+ipcMain.handle("agent:check-health", async () => {
+  return agentProcessManager.performHealthCheck();
+});
+
 ipcMain.handle("shell:openExternal", (_event, url: string) => {
   tryOpenExternal(url);
 });
@@ -106,3 +125,4 @@ ipcMain.handle("shell:openExternal", (_event, url: string) => {
 autoUpdater.on("update-downloaded", () => {
   mainWindow?.webContents.send("update:downloaded");
 });
+

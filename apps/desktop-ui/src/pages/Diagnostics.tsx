@@ -4,10 +4,9 @@ import {
   getLogs,
   getPrinters,
   getQueue,
-  getServiceStatus,
   restartAgent,
 } from "../lib/ipc";
-import type { ServiceStatusDto } from "@shared/index";
+import { useAgentStatus } from "../context/AgentStatusContext";
 
 type LogCategory = "ALL" | "SPOOLER" | "IPC" | "CLOUD" | "ERRORS";
 
@@ -28,13 +27,22 @@ const getErrorMessage = (error: unknown, fallback: string): string => {
 };
 
 export default function Diagnostics() {
+  const {
+    isOnline,
+    isOffline,
+    isRestarting: isAgentRestarting,
+    isStarting,
+    status: serviceStatus,
+    statusText,
+    refresh: refreshAgentHealth,
+  } = useAgentStatus();
+
   const [lines, setLines] = useState<string[]>([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [bundlePath, setBundlePath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [serviceStatus, setServiceStatus] = useState<ServiceStatusDto | null>(null);
   const [restarting, setRestarting] = useState(false);
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -54,13 +62,7 @@ export default function Diagnostics() {
   };
 
   const loadStatus = async () => {
-    if (!isBridgeAvailable()) return;
-    try {
-      const status = await getServiceStatus();
-      setServiceStatus(status);
-    } catch {
-      // Agent may be restarting or unreachable
-    }
+    await refreshAgentHealth();
   };
 
   const loadLogs = async () => {
@@ -264,13 +266,10 @@ export default function Diagnostics() {
     setStatusMessage("Verifying PDF rendering engine and spooler queue...");
 
     try {
-      const [status, queue] = await Promise.all([
-        getServiceStatus(),
-        getQueue(),
-      ]);
-      setServiceStatus(status);
+      const queue = await getQueue();
+      await refreshAgentHealth();
       showStatus(
-        `PDF rendering pipeline verified: Engine ready, ${queue.length} active job(s) in local SQLite queue. Agent v${status.agentVersion}.`,
+        `PDF rendering pipeline verified: Engine ready, ${queue.length} active job(s) in local SQLite queue.${serviceStatus?.agentVersion ? ` Agent v${serviceStatus.agentVersion}.` : ""}`,
         5000
       );
     } catch (err) {
@@ -295,22 +294,21 @@ export default function Diagnostics() {
     setStatusMessage("Testing cloud gateway connectivity...");
 
     try {
-      const status = await getServiceStatus();
-      setServiceStatus(status);
+      await refreshAgentHealth();
 
-      if (status.realtimeConnected) {
+      if (serviceStatus?.realtimeConnected) {
         showStatus(
-          `Cloud gateway connectivity verified: Supabase Realtime connected (Device ID: ${status.deviceId ?? "unpaired"}).`,
+          `Cloud gateway connectivity verified: Supabase Realtime connected (Device ID: ${serviceStatus.deviceId ?? "unpaired"}).`,
           5000
         );
-      } else if (status.mockCloudMode) {
+      } else if (serviceStatus?.mockCloudMode) {
         showStatus(
           "Cloud gateway running in mock cloud mode (local sandbox environment).",
           5000
         );
       } else {
         setError(
-          `Cloud gateway test reported disconnected: Realtime subscription is offline. Device ID: ${status.deviceId ?? "unpaired"}.`
+          `Cloud gateway test reported disconnected: Realtime subscription is offline. Device ID: ${serviceStatus?.deviceId ?? "unpaired"}.`
         );
       }
     } catch (err) {
@@ -446,10 +444,10 @@ export default function Diagnostics() {
           <button
             type="button"
             onClick={() => void handleRestartService()}
-            disabled={restarting}
+            disabled={restarting || isAgentRestarting}
             className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 shadow-2xs transition hover:bg-slate-50 active:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            🔄 {restarting ? "Restarting Agent..." : "Restart Win32 Agent"}
+            🔄 {restarting || isAgentRestarting ? "Restarting Agent..." : "Restart Win32 Agent"}
           </button>
         </div>
       </div>
@@ -548,22 +546,24 @@ export default function Diagnostics() {
 
             <span
               className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${
-                serviceStatus
-                  ? serviceStatus.isPaired
+                isOnline
+                  ? serviceStatus?.isPaired
                     ? "bg-emerald-50 text-emerald-700"
                     : "bg-amber-50 text-amber-700"
-                  : hasBridge
-                    ? "bg-sky-50 text-sky-700"
-                    : "bg-slate-100 text-slate-600"
+                  : isAgentRestarting || isStarting
+                  ? "bg-amber-50 text-amber-700"
+                  : "bg-rose-50 text-rose-700"
               }`}
             >
-              {serviceStatus
-                ? serviceStatus.isPaired
+              {isOnline
+                ? serviceStatus?.isPaired
                   ? "PAIRED"
                   : "UNPAIRED"
-                : hasBridge
-                  ? "READY"
-                  : "OFFLINE"}
+                : isAgentRestarting
+                ? "RESTARTING"
+                : isStarting
+                ? "STARTING"
+                : "OFFLINE"}
             </span>
           </div>
 
@@ -572,15 +572,17 @@ export default function Diagnostics() {
           </p>
 
           <p className="mt-2 text-[11px] text-slate-600">
-            {serviceStatus
+            {isOnline && serviceStatus
               ? `v${serviceStatus.agentVersion} • ${serviceStatus.queuedJobCount} active jobs`
-              : "Background service communication"}
+              : statusText}
           </p>
 
           <p className="mt-1 text-[10px] font-medium text-slate-500">
-            {serviceStatus?.deviceId
+            {isOnline && serviceStatus?.deviceId
               ? `Device: ${serviceStatus.deviceId}`
-              : "Status reported by the Windows Agent."}
+              : isOffline
+              ? "SmartPrinter.Agent is not running."
+              : "Background service communication"}
           </p>
         </div>
 

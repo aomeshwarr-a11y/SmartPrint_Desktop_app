@@ -4,12 +4,154 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { agentPipeClient } from "./pipeClient";
-import type { AgentRestartResult } from "@smartprinter/shared-contracts";
+import type {
+  AgentConnectionState,
+  AgentHealthStatus,
+  AgentRestartResult,
+  ServiceStatusDto,
+} from "@smartprinter/shared-contracts";
 
 const execFile = promisify(child_process.execFile);
+const HEALTH_POLL_INTERVAL_MS = 3000;
 
 export class AgentProcessManager {
   private isRestarting = false;
+  private childProcess: child_process.ChildProcess | null = null;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private statusBroadcaster: ((status: AgentHealthStatus) => void) | null = null;
+
+  private currentHealth: AgentHealthStatus = {
+    state: "offline",
+    serviceStatus: null,
+    error: "SmartPrinter.Agent is not running",
+    lastChecked: new Date().toISOString(),
+  };
+
+  constructor() {
+    // Listen for named pipe connection drops in real-time
+    agentPipeClient.onConnectionChange((connected, err) => {
+      if (!connected) {
+        if (!this.isRestarting) {
+          this.transitionState(
+            "offline",
+            null,
+            err?.message || "Named pipe connection closed."
+          );
+        }
+      }
+    });
+  }
+
+  public setStatusBroadcaster(broadcaster: (status: AgentHealthStatus) => void): void {
+    this.statusBroadcaster = broadcaster;
+    // Broadcast initial state immediately
+    broadcaster(this.currentHealth);
+  }
+
+  public getHealthStatus(): AgentHealthStatus {
+    return this.currentHealth;
+  }
+
+  public startMonitoring(): void {
+    if (this.heartbeatTimer) return;
+
+    // Run immediate check
+    void this.performHealthCheck();
+
+    this.heartbeatTimer = setInterval(() => {
+      void this.performHealthCheck();
+    }, HEALTH_POLL_INTERVAL_MS);
+  }
+
+  public stopMonitoring(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  /**
+   * Probes the Agent over named pipe to retrieve ServiceStatusDto.
+   * Updates state machine based on response or error.
+   */
+  async performHealthCheck(): Promise<AgentHealthStatus> {
+    if (this.isRestarting) {
+      return this.currentHealth;
+    }
+
+    try {
+      // 2000ms timeout for health check - fast failure when agent is dead
+      const status = await agentPipeClient.call<ServiceStatusDto>("GetServiceStatus", undefined, 2000);
+      this.transitionState("online", status, undefined);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.transitionState("offline", null, errMsg);
+    }
+
+    return this.currentHealth;
+  }
+
+  private transitionState(
+    newState: AgentConnectionState,
+    serviceStatus: ServiceStatusDto | null,
+    error?: string
+  ): void {
+    const previousState = this.currentHealth.state;
+    const changed =
+      previousState !== newState ||
+      this.currentHealth.serviceStatus?.queuedJobCount !== serviceStatus?.queuedJobCount ||
+      this.currentHealth.serviceStatus?.realtimeConnected !== serviceStatus?.realtimeConnected ||
+      this.currentHealth.error !== error;
+
+    this.currentHealth = {
+      state: newState,
+      serviceStatus: newState === "online" ? serviceStatus : null,
+      error: newState === "online" ? undefined : error,
+      lastChecked: new Date().toISOString(),
+    };
+
+    if (changed) {
+      this.broadcastStatus();
+    }
+  }
+
+  private broadcastStatus(): void {
+    if (this.statusBroadcaster) {
+      try {
+        this.statusBroadcaster(this.currentHealth);
+      } catch {
+        // Ignore broadcast errors
+      }
+    }
+  }
+
+  /**
+   * Attaches monitoring listeners to a child process spawned by Electron.
+   */
+  private monitorChildProcess(child: child_process.ChildProcess): void {
+    this.childProcess = child;
+
+    child.on("exit", (code, signal) => {
+      this.childProcess = null;
+      if (!this.isRestarting) {
+        this.transitionState("offline", null, `Agent process exited with code ${code ?? signal ?? "unknown"}`);
+      }
+    });
+
+    child.on("error", (err) => {
+      this.childProcess = null;
+      if (!this.isRestarting) {
+        this.transitionState("error", null, `Agent process error: ${err.message}`);
+      }
+    });
+
+    child.on("close", (code, signal) => {
+      this.childProcess = null;
+      if (!this.isRestarting) {
+        this.transitionState("offline", null, `Agent process closed with code ${code ?? signal ?? "unknown"}`);
+      }
+    });
+  }
 
   /**
    * Retrieves process IDs of any currently running SmartPrinter.Agent instances.
@@ -32,7 +174,6 @@ export class AgentProcessManager {
       const lines = stdout.split("\r\n").filter((l) => l.trim().length > 0);
 
       for (const line of lines) {
-        // Format: "SmartPrinter.Agent.exe","10468","Console","4","141,144 K"
         const parts = line.split(",").map((s) => s.replace(/^"|"$/g, "").trim());
         if (parts[0]?.toLowerCase() === "smartprinter.agent.exe") {
           const pid = parseInt(parts[1], 10);
@@ -80,10 +221,8 @@ export class AgentProcessManager {
    */
   findAgentExecutable(): string | null {
     const candidates = [
-      // Development build output
       path.resolve(app.getAppPath(), "../../services/desktop-agent/SmartPrinter.Agent/bin/Debug/net8.0-windows/SmartPrinter.Agent.exe"),
       path.resolve(app.getAppPath(), "../services/desktop-agent/SmartPrinter.Agent/bin/Debug/net8.0-windows/SmartPrinter.Agent.exe"),
-      // Production install locations
       path.join(process.resourcesPath, "agent", "SmartPrinter.Agent.exe"),
       path.join(path.dirname(app.getPath("exe")), "agent", "SmartPrinter.Agent.exe"),
       "C:\\Program Files\\SmartPrinter Desktop\\agent\\SmartPrinter.Agent.exe",
@@ -104,14 +243,15 @@ export class AgentProcessManager {
 
   /**
    * Restarts the desktop Agent process with full verification:
-   * 1. Rejects concurrent restart calls (mutex).
-   * 2. Captures old PIDs.
+   * 1. Rejects concurrent restart calls.
+   * 2. Sets state to "restarting" and broadcasts to frontend.
    * 3. Sends graceful restart signal over Named Pipe.
    * 4. Waits for old process to exit (force-kills if hung after timeout).
-   * 5. Confirms old PID is dead.
+   * 5. Sets state to "starting" and broadcasts to frontend.
    * 6. Starts fresh instance via SCM (if Windows Service) or launches binary.
    * 7. Polls Named Pipe until GetServiceStatus returns success.
-   * 8. Captures new PID and returns verified status.
+   * 8. Sets state to "online" and broadcasts to frontend.
+   * 9. If restart fails, sets state to "error" ("Agent Offline / Restart Failed").
    */
   async restartAgent(): Promise<AgentRestartResult> {
     if (this.isRestarting) {
@@ -123,6 +263,7 @@ export class AgentProcessManager {
     }
 
     this.isRestarting = true;
+    this.transitionState("restarting", null, "Restarting Agent...");
 
     try {
       const oldPids = await this.getRunningAgentPids();
@@ -155,6 +296,9 @@ export class AgentProcessManager {
         await this.sleep(500);
       }
 
+      // Old agent has exited; transition to "starting"
+      this.transitionState("starting", null, "Starting new Agent instance...");
+
       // Step 4: Launch fresh agent instance
       const isService = await this.isWindowsServiceInstalled();
 
@@ -167,6 +311,7 @@ export class AgentProcessManager {
       } else {
         const exePath = this.findAgentExecutable();
         if (!exePath) {
+          this.transitionState("error", null, "Agent Offline / Restart Failed: executable not found");
           return {
             success: false,
             status: "stopped",
@@ -179,6 +324,7 @@ export class AgentProcessManager {
           stdio: "ignore",
           windowsHide: true,
         });
+        this.monitorChildProcess(child);
         child.unref();
       }
 
@@ -190,12 +336,11 @@ export class AgentProcessManager {
         await this.sleep(attempt === 1 ? 1500 : 1000);
 
         try {
-          // Poll GetServiceStatus to verify the IPC server is alive and responding
-          await agentPipeClient.call("GetServiceStatus", undefined, 3000);
-
-          // Get the new PID
+          const status = await agentPipeClient.call<ServiceStatusDto>("GetServiceStatus", undefined, 3000);
           const newPids = await this.getRunningAgentPids();
           const newPid = newPids[0];
+
+          this.transitionState("online", status, undefined);
 
           return {
             success: true,
@@ -208,10 +353,11 @@ export class AgentProcessManager {
         }
       }
 
+      this.transitionState("error", null, "Agent Offline / Restart Failed");
       return {
         success: false,
         status: "stopped",
-        error: `Agent started but did not respond to IPC within 20 seconds. ${lastError}`,
+        error: `Agent Offline / Restart Failed: Agent started but did not respond to IPC within 20 seconds. ${lastError}`,
       };
     } finally {
       this.isRestarting = false;

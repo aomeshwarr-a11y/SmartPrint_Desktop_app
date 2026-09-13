@@ -27,6 +27,28 @@ export class AgentPipeClient {
   private pending = new Map<string, PendingCall>();
   private connecting: Promise<void> | null = null;
   private reconnectDelayMs = 1000;
+  private connectionListeners: Array<(connected: boolean, err?: Error) => void> = [];
+
+  public isConnected(): boolean {
+    return Boolean(this.socket && !this.socket.destroyed);
+  }
+
+  public onConnectionChange(listener: (connected: boolean, err?: Error) => void): () => void {
+    this.connectionListeners.push(listener);
+    return () => {
+      this.connectionListeners = this.connectionListeners.filter((l) => l !== listener);
+    };
+  }
+
+  private notifyConnectionChange(connected: boolean, err?: Error): void {
+    for (const listener of [...this.connectionListeners]) {
+      try {
+        listener(connected, err);
+      } catch {
+        // ignore callback error
+      }
+    }
+  }
 
   async call<TResponse = unknown>(command: string, payload?: unknown, timeoutMs = 15000): Promise<TResponse> {
     await this.ensureConnected();
@@ -129,6 +151,7 @@ export class AgentPipeClient {
         socket.on("error", (err) => this.onClose(err));
         this.socket = socket;
         this.connecting = null;
+        this.notifyConnectionChange(true);
         resolve();
       });
     });
@@ -141,6 +164,7 @@ export class AgentPipeClient {
    * to ensure a clean reconnection to the new Agent process.
    */
   public disconnect(): void {
+    const hadSocket = Boolean(this.socket);
     if (this.socket) {
       try { this.socket.destroy(); } catch { /* ignore */ }
       this.socket = null;
@@ -152,6 +176,9 @@ export class AgentPipeClient {
       // Don't reject - the caller (restartAgent) already handles this.
     }
     this.pending.clear();
+    if (hadSocket) {
+      this.notifyConnectionChange(false);
+    }
   }
 
   private sleep(ms: number): Promise<void> {
@@ -184,12 +211,16 @@ export class AgentPipeClient {
   }
 
   private onClose(err?: Error) {
+    const hadSocket = Boolean(this.socket);
     this.socket = null;
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timeout);
       pending.reject(err ?? new Error("Connection to SmartPrinter.Agent was closed."));
     }
     this.pending.clear();
+    if (hadSocket) {
+      this.notifyConnectionChange(false, err);
+    }
   }
 }
 

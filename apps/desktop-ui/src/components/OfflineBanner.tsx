@@ -1,17 +1,26 @@
 import { useAgentStatus } from "../context/AgentStatusContext";
 
 export default function OfflineBanner() {
-  const { status, error } = useAgentStatus();
+  const { isOffline, isRestarting, isStarting, isOnline, status, error } = useAgentStatus();
 
-  if (error) {
+  if (isOffline) {
     return (
-      <div className="border-b border-red-200 bg-red-50 px-6 py-2 text-sm text-red-800">
-        Can&apos;t reach the SmartPrinter background service. Jobs will queue once it reconnects. ({error})
+      <div className="border-b border-rose-200 bg-rose-50 px-6 py-2 text-sm text-rose-800">
+        SmartPrinter background agent is offline / not running. Print jobs cannot be processed until the agent starts.
+        {error ? ` (${error})` : ""}
       </div>
     );
   }
 
-  if (status && status.isPaired && !status.realtimeConnected) {
+  if (isRestarting || isStarting) {
+    return (
+      <div className="border-b border-amber-200 bg-amber-50 px-6 py-2 text-sm text-amber-800">
+        {isRestarting ? "Restarting SmartPrinter Agent..." : "Connecting to SmartPrinter Agent..."}
+      </div>
+    );
+  }
+
+  if (isOnline && status && status.isPaired && !status.realtimeConnected) {
     return (
       <div className="border-b border-amber-200 bg-amber-50 px-6 py-2 text-sm text-amber-800">
         Offline — waiting to reconnect to SmartPrinter cloud. Any jobs already queued locally will still print.

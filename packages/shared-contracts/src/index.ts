@@ -155,3 +155,24 @@ export interface AgentRestartResult {
   status: "running" | "stopped" | "error";
   error?: string;
 }
+
+// ---------------- Agent Health & Connection Lifecycle ----------------
+
+export type AgentConnectionState =
+  | "starting"
+  | "online"
+  | "offline"
+  | "restarting"
+  | "error";
+
+export interface AgentHealthStatus {
+  state: AgentConnectionState;
+  serviceStatus: ServiceStatusDto | null;
+  error?: string;
+  lastChecked?: string;
+}
+
+export const AgentIpcEvents = {
+  StatusChanged: "agent:status-changed",
+} as const;
+

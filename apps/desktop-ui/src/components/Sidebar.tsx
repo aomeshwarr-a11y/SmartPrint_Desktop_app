@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { NavLink, useLocation } from "react-router-dom";
-import { getServiceStatus, getJobs, getPrinters } from "../lib/ipc";
+import { getPrinters } from "../lib/ipc";
 import { supabase } from "../lib/supabaseClient";
 import { useAuth } from "../context/AuthContext";
-import type { ServiceStatusDto } from "@shared/index";
+import { useAgentStatus } from "../context/AgentStatusContext";
 
 interface NavItem {
   to: string;
@@ -16,41 +16,39 @@ interface NavItem {
 export default function Sidebar() {
   const location = useLocation();
   const { session } = useAuth();
+  const {
+    isOnline,
+    isRestarting,
+    isStarting,
+    status: serviceStatus,
+  } = useAgentStatus();
 
-  // Live Agent / Hardware status
-  const [serviceStatus, setServiceStatus] = useState<ServiceStatusDto | null>(null);
-  const [spoolerConnected, setSpoolerConnected] = useState<boolean>(false);
-  const [activeJobCount, setActiveJobCount] = useState<number>(0);
   const [printerCount, setPrinterCount] = useState<number>(0);
-  const [agentVersion, setAgentVersion] = useState<string>("v2.0");
   const [shopSlug, setShopSlug] = useState<string>("");
 
-  useEffect(() => {
-    async function checkAgentStatus() {
-      try {
-        const [status, jobs, printers] = await Promise.all([
-          getServiceStatus().catch(() => null),
-          getJobs().catch(() => []),
-          getPrinters().catch(() => []),
-        ]);
+  const activeJobCount = isOnline ? (serviceStatus?.queuedJobCount ?? 0) : 0;
+  const agentVersion = isOnline && serviceStatus?.agentVersion ? `v${serviceStatus.agentVersion}` : isRestarting ? "Restarting" : isStarting ? "Connecting" : "Not Running";
 
-        if (status) {
-          setServiceStatus(status);
-          setSpoolerConnected(true);
-          if (status.agentVersion) setAgentVersion(`v${status.agentVersion}`);
-        } else {
-          setSpoolerConnected(false);
-        }
-        setActiveJobCount(jobs.filter((j) => j.status === "queued" || j.status === "printing" || j.status === "claimed").length);
-        setPrinterCount(printers.length);
-      } catch (err) {
-        setSpoolerConnected(false);
-      }
+  // Fetch printer count only when agent is online, not on an aggressive loop
+  useEffect(() => {
+    if (!isOnline) {
+      setPrinterCount(0);
+      return;
     }
-    checkAgentStatus();
-    const timer = setInterval(checkAgentStatus, 8000);
-    return () => clearInterval(timer);
-  }, []);
+
+    let active = true;
+    getPrinters()
+      .then((printers) => {
+        if (active) setPrinterCount(printers.length);
+      })
+      .catch(() => {
+        if (active) setPrinterCount(0);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [isOnline]);
 
   useEffect(() => {
     async function loadShopSlug() {
@@ -269,7 +267,11 @@ export default function Sidebar() {
           <div className="flex items-center gap-1.5">
             <span
               className={`h-2 w-2 rounded-full ${
-                spoolerConnected ? "bg-emerald-500 animate-pulse" : "bg-rose-500"
+                isOnline
+                  ? "bg-emerald-500 animate-pulse"
+                  : isRestarting || isStarting
+                  ? "bg-amber-500 animate-pulse"
+                  : "bg-rose-500"
               }`}
             />
             <span className="font-semibold text-slate-700">Win32 Agent</span>
@@ -342,10 +344,16 @@ export default function Sidebar() {
         <div className="rounded-xl border border-slate-200/70 bg-white p-2.5 shadow-2xs">
           <div className="flex items-center justify-between text-[11px]">
             <span className="font-semibold text-slate-800">
-              {serviceStatus?.deviceId ? `STATION-${serviceStatus.deviceId.slice(0, 8)}` : "Station 01"}
+              {isOnline && serviceStatus?.deviceId ? `STATION-${serviceStatus.deviceId.slice(0, 8)}` : "Station 01"}
             </span>
-            <span className={`text-[10px] font-mono font-medium ${spoolerConnected ? "text-emerald-600" : "text-rose-500"}`}>
-              {spoolerConnected ? "Ready" : "Offline"}
+            <span className={`text-[10px] font-mono font-medium ${
+              isOnline
+                ? "text-emerald-600"
+                : isRestarting || isStarting
+                ? "text-amber-600"
+                : "text-rose-500"
+            }`}>
+              {isOnline ? "Ready" : isRestarting ? "Restarting" : isStarting ? "Connecting" : "Offline / Not Running"}
             </span>
           </div>
           <p className="text-[10px] text-slate-400 truncate mt-0.5">
