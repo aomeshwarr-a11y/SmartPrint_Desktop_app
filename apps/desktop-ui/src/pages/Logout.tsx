@@ -132,7 +132,7 @@ export default function Logout() {
 
     try {
       await signOut();
-      navigate("/");
+      navigate("/login", { replace: true });
     } catch (err) {
       setActionError(
         getErrorMessage(

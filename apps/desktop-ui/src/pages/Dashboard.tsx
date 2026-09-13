@@ -378,9 +378,9 @@ export default function Dashboard() {
         <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 shadow-sm">
           <div>
             <span className="font-semibold">
-              SmartPrinter Agent Offline / Not Running:
+              Agent Offline:
             </span>{" "}
-            {error || agentError || "SmartPrinter.Agent is not running or unreachable."}
+            {error || agentError || "SmartPrinter Agent is not running or unreachable."}
           </div>
 
           <button
@@ -452,7 +452,7 @@ export default function Dashboard() {
                 }`}
               />
 
-              {isOnline ? "Agent Online" : statusText}
+              {isOnline ? "Connected / Running" : statusText}
 
               {isOnline && agent.version && (
                 <span className="font-mono text-[11px]">

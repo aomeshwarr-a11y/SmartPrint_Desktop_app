@@ -119,7 +119,7 @@ export function AgentStatusProvider({ children }: { children: ReactNode }) {
   let statusText: string;
   switch (health.state) {
     case "online":
-      statusText = "Online";
+      statusText = "Connected / Running";
       break;
     case "restarting":
       statusText = "Restarting...";
@@ -128,11 +128,11 @@ export function AgentStatusProvider({ children }: { children: ReactNode }) {
       statusText = "Connecting...";
       break;
     case "error":
-      statusText = health.error || "Agent Offline / Restart Failed";
+      statusText = "Agent Offline";
       break;
     case "offline":
     default:
-      statusText = "Agent Offline / Not Running";
+      statusText = "Agent Offline";
       break;
   }
 

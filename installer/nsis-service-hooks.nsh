@@ -24,6 +24,7 @@
   nsExec::ExecToLog 'sc.exe create $1 binPath= "$0" start= auto DisplayName= "SmartPrinter Desktop Agent"'
   nsExec::ExecToLog 'sc.exe description $1 "Receives paid print jobs from SmartPrinter.in and sends them to this computer'\''s printer."'
   nsExec::ExecToLog 'sc.exe failure $1 reset= 86400 actions= restart/5000/restart/5000/restart/5000'
+  nsExec::ExecToLog 'sc.exe failureflag $1 1'
 
   CreateDirectory "$COMMONPROGRAMDATA\SmartPrinter\Agent"
   ; Restrict the data directory (DPAPI credential + local SQLite queue) to

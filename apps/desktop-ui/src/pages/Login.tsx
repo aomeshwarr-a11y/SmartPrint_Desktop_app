@@ -1,11 +1,11 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { isSupabaseConfigured, supabase } from "../lib/supabaseClient";
 import { getServiceStatus } from "../lib/ipc";
 
 export default function Login() {
-  const { signIn } = useAuth();
+  const { signIn, session, loading } = useAuth();
   const navigate = useNavigate();
 
   const [email, setEmail] = useState("");
@@ -14,6 +14,13 @@ export default function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  // If already authenticated with a valid session, go directly to Dashboard
+  useEffect(() => {
+    if (!loading && session) {
+      navigate("/dashboard", { replace: true });
+    }
+  }, [session, loading, navigate]);
 
   async function handleSubmit(event: FormEvent) {
   event.preventDefault();
@@ -62,27 +69,28 @@ export default function Login() {
       return;
     }
 
-    // 5. SHOP EXISTS -> CHECK PAIRING
+    // 5. SHOP EXISTS -> CHECK PAIRING WITH AGENT
     try {
       const serviceStatus = await getServiceStatus();
 
-      // 6. NOT PAIRED -> PAIRING
-      if (!serviceStatus?.isPaired) {
+      // 6. Agent is running and explicitly not paired -> PAIRING
+      if (serviceStatus && !serviceStatus.isPaired) {
         navigate("/pairing", { replace: true });
         return;
       }
 
-      // 7. ALREADY PAIRED -> DASHBOARD
+      // 7. PAIRED -> DASHBOARD
       navigate("/dashboard", { replace: true });
     } catch (agentError) {
-      console.error(
-        "Unable to check SmartPrinter Agent pairing status:",
+      console.warn(
+        "SmartPrinter Agent is offline or unreachable during login:",
         agentError
       );
 
-      // If pairing status cannot be verified,
-      // send the user to the pairing screen.
-      navigate("/pairing", { replace: true });
+      // Per Requirement 5 & 6 (Case E): Agent is offline/stopped, but the user is authenticated.
+      // Do not block dashboard access or misdirect to pairing; navigate to dashboard which
+      // displays 'Agent Offline'.
+      navigate("/dashboard", { replace: true });
       return;
     }
   } catch (err) {

@@ -19,19 +19,58 @@ import Diagnostics from "./pages/Diagnostics";
 import Logout from "./pages/Logout";
 import UpdateStatus from "./pages/UpdateStatus";
 
+function AuthLoadingScreen() {
+  return (
+    <div className="flex h-screen w-screen items-center justify-center bg-[#071328] select-none font-sans">
+      <div className="flex flex-col items-center gap-3 text-center">
+        <div className="h-9 w-9 animate-spin rounded-full border-3 border-[#0062d2] border-t-transparent" />
+        <div className="space-y-1">
+          <p className="text-sm font-semibold tracking-tight text-white">SmartPrinter</p>
+          <p className="text-xs text-slate-400">Restoring session...</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Initial entry router (Requirement 3):
+ * Start Electron -> Initialize Supabase -> Restore authentication session -> Check authentication state
+ * Valid session?
+ *   YES -> Dashboard
+ *   NO  -> Sign In (/login)
+ */
+function InitialAuthRoute() {
+  const { session, loading } = useAuth();
+
+  if (loading) {
+    return <AuthLoadingScreen />;
+  }
+
+  if (session) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  return <Navigate to="/login" replace />;
+}
+
 function RequireAuth({ children }: { children: JSX.Element }) {
   const { session, loading } = useAuth();
-  if (loading) return <div className="flex h-screen items-center justify-center text-brand-500">Loading...</div>;
-  if (!session) return <Navigate to="/" replace />;
+  if (loading) return <AuthLoadingScreen />;
+  if (!session) return <Navigate to="/login" replace />;
   return children;
 }
 
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<Welcome />} />
+      {/* Root route: decides between Dashboard and Sign In after session restoration */}
+      <Route path="/" element={<InitialAuthRoute />} />
+
+      {/* Auth routes */}
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
+      <Route path="/welcome" element={<Welcome />} />
 
       {/* Onboarding steps happen outside the main dashboard shell. */}
       <Route

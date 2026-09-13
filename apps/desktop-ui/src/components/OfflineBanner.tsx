@@ -6,7 +6,7 @@ export default function OfflineBanner() {
   if (isOffline) {
     return (
       <div className="border-b border-rose-200 bg-rose-50 px-6 py-2 text-sm text-rose-800">
-        SmartPrinter background agent is offline / not running. Print jobs cannot be processed until the agent starts.
+        Agent Offline: SmartPrinter background agent is not running. Print jobs cannot be processed until the agent starts.
         {error ? ` (${error})` : ""}
       </div>
     );

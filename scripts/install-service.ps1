@@ -45,6 +45,7 @@ sc.exe description $ServiceName "Receives paid print jobs from SmartPrinter.in a
 
 # Restart automatically on failure AND on a clean exit (see IpcRouter.RequestServiceRestart)
 sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+sc.exe failureflag $ServiceName 1 | Out-Null
 
 Start-Service -Name $ServiceName
 Write-Host "SmartPrinter.Agent installed and started as Windows Service '$ServiceName'."
