@@ -247,10 +247,10 @@ export default function DevicePairing() {
   };
 
   return (
-    <div className="flex min-h-screen w-screen flex-col bg-[#faf8ff] font-sans text-slate-800 antialiased select-none overflow-x-hidden">
+    <div className="flex h-screen w-screen flex-col overflow-hidden bg-[#faf8ff] font-sans text-slate-800 antialiased select-none">
 
       {/* 1. APPLICATION HEADER */}
-      <header className="flex h-14 w-full items-center justify-between border-b border-slate-200/80 px-6 lg:px-8 bg-white shrink-0">
+      <header className="flex h-12 w-full items-center justify-between border-b border-slate-200/80 px-6 lg:px-8 bg-white shrink-0">
         <div className="flex items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-600 text-white shadow-xs">
             <svg
@@ -262,7 +262,7 @@ export default function DevicePairing() {
           </div>
 
           <span className="text-base font-bold tracking-tight text-slate-900">
-            SmartPrinter Control Suite
+            SmartPrinter
           </span>
 
           <span className="rounded bg-slate-100 px-2 py-0.5 text-[10px] font-mono text-slate-500">
@@ -279,9 +279,9 @@ export default function DevicePairing() {
       </header>
 
       {/* 2. ONBOARDING STEP PROGRESS HEADER */}
-      <div className="border-b border-slate-200/70 bg-white px-6 lg:px-8 py-3">
+      <div className="h-11 shrink-0 border-b border-slate-200/70 bg-white px-6 lg:px-8 py-2">
         <div className="mx-auto flex max-w-7xl items-center justify-between">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
             <span className="rounded-md bg-slate-900 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-white">
               Step 2 of 2
             </span>
@@ -310,11 +310,11 @@ export default function DevicePairing() {
       </div>
 
       {/* 3. MAIN WORKSPACE */}
-      <main className="flex-1 p-6 lg:p-8">
-        <div className="mx-auto max-w-7xl">
+      <main className="min-h-0 flex-1 overflow-hidden px-6 py-3 lg:px-8">
+        <div className="mx-auto flex h-full min-h-0 max-w-7xl flex-col">
 
           {errorMessage && (
-            <div className="mb-5 flex items-start justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 p-3.5 text-xs text-rose-700">
+            <div className="mb-2 flex items-start justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 p-2.5 text-xs text-rose-700">
               <span>{errorMessage}</span>
 
               <button
@@ -328,13 +328,13 @@ export default function DevicePairing() {
             </div>
           )}
 
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+          <div className="grid h-full min-h-0 grid-cols-1 gap-4 lg:grid-cols-12">
 
             {/* LEFT COLUMN: PAIRING CONTROLS & LOCAL TELEMETRY */}
-            <div className="space-y-5 lg:col-span-5">
+            <div className="flex min-h-0 flex-col gap-3 lg:col-span-5">
 
               {/* Win32 Spooler Status Card */}
-              <div className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs">
+              <div className="shrink-0 rounded-2xl border border-slate-200/90 bg-white p-3 shadow-xs">
                 <div className="flex items-center justify-between text-xs">
                   <div className="flex items-center gap-2">
                     <span className="text-base">📟</span>
@@ -355,7 +355,7 @@ export default function DevicePairing() {
                   </span>
                 </div>
 
-                <div className="mt-3 grid grid-cols-3 gap-2 rounded-xl bg-slate-50 p-2 text-center text-[10px]">
+                <div className="mt-2 grid grid-cols-3 gap-2 rounded-xl bg-slate-50 p-2 text-center text-[10px]">
                   <div>
                     <span className="text-slate-400 block">
                       Agent Cache
@@ -389,7 +389,7 @@ export default function DevicePairing() {
               </div>
 
               {/* Station Pairing Token Box */}
-              <div className="rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs">
+              <div className="shrink-0 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs">
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-700">
                     One-Time Secure Key
@@ -417,10 +417,10 @@ export default function DevicePairing() {
                 </h2>
 
                 {/* Digit Boxes */}
-                <div className="mt-4 flex items-center justify-center gap-2">
+                <div className="mt-3 flex items-center justify-center gap-1.5">
                   {pairingCode.split("").map((digit, idx) => (
                     <Fragment key={idx}>
-                      <div className="flex h-13 w-10 sm:w-12 items-center justify-center rounded-xl border border-emerald-200 bg-emerald-50/40 text-xl sm:text-2xl font-black text-slate-900 shadow-2xs font-mono">
+                      <div className="flex h-11 w-9 sm:w-10 items-center justify-center rounded-xl border border-emerald-200 bg-emerald-50/40 text-xl sm:text-2xl font-black text-slate-900 shadow-2xs font-mono">
                         {digit}
                       </div>
 
@@ -434,7 +434,7 @@ export default function DevicePairing() {
                 </div>
 
                 {/* Actions */}
-                <div className="mt-4 flex items-center justify-between pt-2">
+                <div className="mt-3 flex items-center justify-between pt-1">
                   <button
                     type="button"
                     onClick={handleCopy}
@@ -449,10 +449,10 @@ export default function DevicePairing() {
                 </div>
 
                 {/* Mobile QR Companion Option */}
-                <div className="mt-5 rounded-xl border border-dashed border-slate-200 bg-slate-50/60 p-3.5 flex items-center gap-3.5">
-                  <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-lg bg-white border border-slate-200 shadow-2xs">
+                <div className="mt-3 rounded-xl border border-dashed border-slate-200 bg-slate-50/60 p-3.5 flex items-center gap-3.5">
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-white border border-slate-200 shadow-2xs">
                     <svg
-                      className="h-11 w-11"
+                      className="h-9 w-9"
                       viewBox="0 0 24 24"
                       fill="#0f172a"
                     >
@@ -511,7 +511,7 @@ export default function DevicePairing() {
               </div>
 
               {/* Handshake Milestones Checklist */}
-              <div className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs text-xs space-y-2.5">
+              <div className="min-h-0 flex-1 rounded-2xl border border-slate-200/90 bg-white p-3 shadow-xs text-xs space-y-2">
                 <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
                   Handshake Milestones
                 </p>
@@ -569,10 +569,10 @@ export default function DevicePairing() {
             </div>
 
             {/* RIGHT COLUMN: INTERACTIVE TOPOLOGY MESH RADAR */}
-            <div className="space-y-5 lg:col-span-7">
-              <div className="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-xs relative overflow-hidden">
+            <div className="flex min-h-0 flex-col gap-3 lg:col-span-7">
+              <div className="min-h-0 flex-1 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs relative overflow-hidden">
 
-                <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
                     <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 animate-ping" />
 
@@ -587,16 +587,16 @@ export default function DevicePairing() {
                 </div>
 
                 {/* Radar Topology Canvas */}
-                <div className="relative h-[340px] w-full rounded-xl bg-slate-50/80 border border-slate-200/70 p-4 flex items-center justify-center overflow-hidden">
+                <div className="relative h-[270px] w-full rounded-xl bg-slate-50/80 border border-slate-200/70 p-4 flex items-center justify-center overflow-hidden">
 
                   {/* Concentric Radar Rings */}
-                  <div className="absolute h-64 w-64 rounded-full border border-slate-200/60" />
-                  <div className="absolute h-44 w-44 rounded-full border border-slate-200/80" />
-                  <div className="absolute h-24 w-24 rounded-full border border-emerald-200 bg-emerald-50/20" />
+                  <div className="absolute h-52 w-52 rounded-full border border-slate-200/60" />
+                  <div className="absolute h-36 w-36 rounded-full border border-slate-200/80" />
+                  <div className="absolute h-20 w-20 rounded-full border border-emerald-200 bg-emerald-50/20" />
 
                   {/* CENTER NODE: DESKTOP KIOSK STATION */}
                   <div className="relative z-20 flex flex-col items-center">
-                    <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-white border-2 border-emerald-500 shadow-md text-slate-800">
+                    <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white border-2 border-emerald-500 shadow-md text-slate-800">
                       <span className="text-2xl">🖥️</span>
                     </div>
 
@@ -690,7 +690,7 @@ export default function DevicePairing() {
                 </div>
 
                 {/* Discovered Hardware Ports summary */}
-                <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50/50 p-3">
+                <div className="mt-2 rounded-xl border border-slate-100 bg-slate-50/50 p-3">
                   <div className="flex items-center justify-between text-xs font-semibold text-slate-700 mb-1.5">
                     <span>
                       DISCOVERED LOCAL HARDWARE VIA WIN32 SPOOLER
@@ -702,7 +702,7 @@ export default function DevicePairing() {
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] font-mono text-slate-500">
+                  <div className="grid grid-cols-3 gap-2 text-[10px] font-mono text-slate-500">
                     {discoveredPrinters.length > 0 ? (
                       discoveredPrinters.slice(0, 3).map((p, idx) => (
                         <div
@@ -722,7 +722,7 @@ export default function DevicePairing() {
               </div>
 
               {/* Physical Kiosk Security Attestation */}
-              <div className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs flex items-center justify-between">
+              <div className="shrink-0 rounded-2xl border border-slate-200/90 bg-white p-3 shadow-xs flex items-center justify-between">
                 <div className="flex items-center gap-3 text-xs">
                   <span className="text-xl">🛡️</span>
 
@@ -744,7 +744,7 @@ export default function DevicePairing() {
           </div>
 
           {/* 4. ACTION BAR FOOTER */}
-          <div className="mt-6 flex flex-col sm:flex-row items-center justify-between gap-4 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs">
+          <div className="mt-3 shrink-0 flex flex-col sm:flex-row items-center justify-between gap-3 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs">
 
             <div className="flex items-center gap-2 text-xs text-slate-600">
               <span className="h-2 w-2 rounded-full bg-emerald-500" />
@@ -758,7 +758,7 @@ export default function DevicePairing() {
               </span>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2.5">
 
               {/* FIXED: React modal instead of prompt() */}
               <button
