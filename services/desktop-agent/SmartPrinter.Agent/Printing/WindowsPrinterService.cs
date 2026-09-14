@@ -50,7 +50,8 @@ public sealed class WindowsPrinterService : IPrinterService
                     IsDefault = string.Equals(printer.pPrinterName, defaultPrinter, StringComparison.OrdinalIgnoreCase),
                     Availability = availability,
                     SupportsDuplex = supportsDuplex,
-                    SupportsColor = supportsColor
+                    SupportsColor = supportsColor,
+                    ConnectionType = DetermineConnectionType(printer.pPortName ?? "", printer.pDriverName ?? "", printer.pPrinterName ?? "")
                 });
             });
 
@@ -343,6 +344,27 @@ public sealed class WindowsPrinterService : IPrinterService
         if ((status & NativeMethods.PRINTER_STATUS_BUSY) != 0 || (status & NativeMethods.PRINTER_STATUS_PRINTING) != 0)
             return PrinterAvailability.Busy;
         return PrinterAvailability.Ready;
+    }
+
+    private static string DetermineConnectionType(string portName, string driverName, string printerName)
+    {
+        var port = portName.ToUpperInvariant();
+        var driver = driverName.ToUpperInvariant();
+        var name = printerName.ToUpperInvariant();
+
+        if (port.Contains("USB") || driver.Contains("USB"))
+            return "USB";
+
+        if (port.Contains("BTH") || port.Contains("BLUETOOTH") || driver.Contains("BLUETOOTH") || port.StartsWith("COM"))
+            return "Bluetooth";
+
+        if (port.StartsWith("IP_") || port.StartsWith("WSD") || port.Contains("TCP") || port.Contains("IPP") || port.Contains("HTTP") || System.Text.RegularExpressions.Regex.IsMatch(port, @"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"))
+            return "Network (Wi-Fi / LAN)";
+
+        if (port.StartsWith("PORTPROMPT") || port.StartsWith("FILE:") || port.StartsWith("NUL:") || name.Contains("PDF") || name.Contains("XPS") || name.Contains("ONENOTE") || name.Contains("FAX"))
+            return "Virtual";
+
+        return "Windows Printer";
     }
 
     private static PaperSize? FindPaperSize(PrinterSettings settings, short kind)

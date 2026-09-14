@@ -53,12 +53,35 @@ export default function Sidebar() {
   useEffect(() => {
     async function loadShopSlug() {
       if (!session) return;
-      const { data } = await supabase
-        .from("shops")
-        .select("slug")
-        .eq("owner_user_id", session.user.id)
-        .maybeSingle();
-      if (data?.slug) setShopSlug(data.slug);
+      try {
+        // 1. Check branches where user is owner or manager
+        const { data: ownedBranch } = await supabase
+          .from("branches")
+          .select("id")
+          .or(`owner_id.eq.${session.user.id},manager_id.eq.${session.user.id}`)
+          .limit(1)
+          .maybeSingle();
+
+        if (ownedBranch?.id) {
+          setShopSlug(ownedBranch.id);
+          return;
+        }
+
+        // 2. Check user_roles table for branch membership
+        const { data: roleRow } = await supabase
+          .from("user_roles")
+          .select("branch_id")
+          .eq("user_id", session.user.id)
+          .in("role", ["branch", "branch_owner", "shop_owner"])
+          .limit(1)
+          .maybeSingle();
+
+        if (roleRow?.branch_id) {
+          setShopSlug(roleRow.branch_id);
+        }
+      } catch (err) {
+        console.warn("Could not load branch id for sidebar:", err);
+      }
     }
     void loadShopSlug();
   }, [session]);
@@ -81,6 +104,27 @@ export default function Sidebar() {
           <rect x="14" y="3" width="7" height="7" rx="1.5" />
           <rect x="14" y="14" width="7" height="7" rx="1.5" />
           <rect x="3" y="14" width="7" height="7" rx="1.5" />
+        </svg>
+      ),
+    },
+    {
+      to: "/printers",
+      label: "Printers",
+      badge: printerCount > 0 ? `${printerCount}` : undefined,
+      badgeType: "neutral",
+      icon: (active) => (
+        <svg
+          className={`h-4 w-4 transition-colors ${active ? "text-emerald-700" : "text-slate-400 group-hover:text-slate-600"}`}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <polyline points="6 9 6 2 18 2 18 9" />
+          <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+          <rect x="6" y="14" width="12" height="8" rx="1" />
         </svg>
       ),
     },

@@ -28,6 +28,9 @@ export default function DevicePairing() {
   // Manual PIN modal
   const [showManualPinModal, setShowManualPinModal] = useState<boolean>(false);
 
+  // Active branch ID
+  const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
+
   // Shop Info from Supabase
   const [shopName, setShopName] = useState<string>("My Print Shop");
   const [shopSlug, setShopSlug] = useState<string>("my-print-shop");
@@ -40,6 +43,7 @@ export default function DevicePairing() {
     mockCloudMode: false,
     agentVersion: "2.4.1",
     queuedJobCount: 0,
+    agentId: undefined,
     deviceId: undefined,
   });
 
@@ -61,27 +65,70 @@ export default function DevicePairing() {
       .padStart(2, "0")}`;
   };
 
-  // Load shop from Supabase and system state from IPC
+  // Load branch/shop from Supabase and system state from IPC
   useEffect(() => {
     async function loadShopAndSystem() {
       if (isSupabaseConfigured && session?.user) {
+        let branchId: string | null = null;
         try {
-          const { data } = await supabase
-            .from("shops")
-            .select("name, slug")
-            .eq("owner_user_id", session.user.id)
+          // 1. Check branches where user is owner or manager
+          const { data: ownedBranch } = await supabase
+            .from("branches")
+            .select("id, name")
+            .or(`owner_id.eq.${session.user.id},manager_id.eq.${session.user.id}`)
+            .limit(1)
             .maybeSingle();
 
-          if (data?.name) {
-            setShopName(data.name);
+          if (ownedBranch?.id) {
+            branchId = ownedBranch.id;
+            if (ownedBranch.name) setShopName(ownedBranch.name);
+            setShopSlug(ownedBranch.id);
+          } else {
+            // 2. Check user_roles table
+            const { data: roleRow } = await supabase
+              .from("user_roles")
+              .select("branch_id, branches(id, name)")
+              .eq("user_id", session.user.id)
+              .in("role", ["branch", "branch_owner", "shop_owner"])
+              .limit(1)
+              .maybeSingle();
+
+            if (roleRow?.branch_id) {
+              branchId = roleRow.branch_id;
+              const b = (roleRow as any).branches;
+              if (b?.name) setShopName(b.name);
+              setShopSlug(roleRow.branch_id);
+            }
           }
 
-          if (data?.slug) {
-            setShopSlug(data.slug);
+          // 3. Admin fallback to first available branch
+          if (!branchId) {
+            try {
+              const { data: adminRpc } = await supabase.rpc("is_admin");
+              if (adminRpc === true) {
+                const { data: anyBranch } = await supabase
+                  .from("branches")
+                  .select("id, name")
+                  .limit(1)
+                  .maybeSingle();
+
+                if (anyBranch?.id) {
+                  branchId = anyBranch.id;
+                  if (anyBranch.name) setShopName(anyBranch.name);
+                  setShopSlug(anyBranch.id);
+                }
+              }
+            } catch {
+              // Ignore
+            }
+          }
+
+          if (branchId) {
+            setActiveBranchId(branchId);
           }
         } catch (err) {
           console.warn(
-            "Could not load shop details for pairing screen:",
+            "Could not load branch/shop details for pairing screen:",
             err
           );
         }
@@ -106,7 +153,7 @@ export default function DevicePairing() {
     void loadShopAndSystem();
   }, [session]);
 
-  // Generate / Refresh Pairing Code via IPC or Edge Function
+  // Generate / Refresh Pairing Code via Edge Function or IPC fallback
   const fetchPairingToken = useCallback(async () => {
     if (!session?.access_token) {
       setErrorMessage(
@@ -119,26 +166,68 @@ export default function DevicePairing() {
     setErrorMessage(null);
 
     try {
-      const res = await pairDeviceCreate({
-        ownerAccessToken: session.access_token,
+      // Call /functions/v1/device-pairing-create via Supabase client (user JWT authenticated)
+      const body = activeBranchId ? { branch_id: activeBranchId } : {};
+      const { data, error } = await supabase.functions.invoke<{
+        request_id: string;
+        pairing_code: string;
+        expires_at: string;
+        branch_id: string;
+      }>("device-pairing-create", {
+        body,
       });
 
-      if (res?.pairingCode) {
-        setPairingCode(res.pairingCode);
+      if (error) {
+        throw new Error(error.message || "Failed to create pairing request.");
+      }
 
-        if (res.expiresAt) {
+      if (data?.pairing_code) {
+        setPairingCode(data.pairing_code);
+
+        if (data.branch_id && !activeBranchId) {
+          setActiveBranchId(data.branch_id);
+        }
+
+        if (data.expires_at) {
           const diff = Math.max(
             0,
             Math.floor(
-              (new Date(res.expiresAt).getTime() - Date.now()) / 1000
+              (new Date(data.expires_at).getTime() - Date.now()) / 1000
             )
           );
 
           setExpiresInSeconds(diff || 600);
         }
+        return;
       }
     } catch (err: any) {
-      console.warn("Pairing token request error:", err);
+      console.warn("Pairing token request error via Edge Function:", err);
+
+      // Graceful fallback to agent IPC pairDeviceCreate if available
+      try {
+        const res = await pairDeviceCreate({
+          ownerAccessToken: session.access_token,
+          branchId: activeBranchId || undefined,
+        });
+
+        if (res?.pairingCode) {
+          setPairingCode(res.pairingCode);
+
+          if (res.expiresAt) {
+            const diff = Math.max(
+              0,
+              Math.floor(
+                (new Date(res.expiresAt).getTime() - Date.now()) / 1000
+              )
+            );
+
+            setExpiresInSeconds(diff || 600);
+          }
+          return;
+        }
+      } catch (ipcErr) {
+        console.warn("IPC pair fallback error:", ipcErr);
+      }
 
       setErrorMessage(
         err instanceof Error
@@ -148,7 +237,7 @@ export default function DevicePairing() {
     } finally {
       setLoading(false);
     }
-  }, [session]);
+  }, [session, activeBranchId]);
 
   useEffect(() => {
     void fetchPairingToken();
@@ -601,8 +690,8 @@ export default function DevicePairing() {
                     </div>
 
                     <span className="mt-1.5 font-mono text-xs font-bold text-slate-800">
-                      {serviceStatus?.deviceId
-                        ? `STATION-${serviceStatus.deviceId.substring(0, 8)}`
+                      {serviceStatus?.agentId || serviceStatus?.deviceId
+                        ? `STATION-${(serviceStatus.agentId || serviceStatus.deviceId)!.substring(0, 8)}`
                         : "DESKTOP-PRINT-01"}
                     </span>
 

@@ -9,8 +9,34 @@ namespace SmartPrinter.Agent.Cloud;
 /// </summary>
 public sealed class AgentRuntimeState
 {
-    public Guid? DeviceId { get; set; }
-    public Guid? ShopId { get; set; }
+    private Guid? _agentId;
+    private Guid? _branchId;
+
+    public Guid? AgentId
+    {
+        get => _agentId;
+        set => _agentId = value;
+    }
+
+    public Guid? BranchId
+    {
+        get => _branchId;
+        set => _branchId = value;
+    }
+
+    // Backward-compatible accessors for existing consumers
+    public Guid? DeviceId
+    {
+        get => _agentId;
+        set => _agentId = value;
+    }
+
+    public Guid? ShopId
+    {
+        get => _branchId;
+        set => _branchId = value;
+    }
+
     public bool RealtimeConnected { get; set; }
     public bool MockCloudMode { get; set; }
     public DateTime StartedAtUtc { get; } = DateTime.UtcNow;

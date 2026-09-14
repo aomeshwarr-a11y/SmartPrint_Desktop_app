@@ -20,5 +20,5 @@ public sealed class SupabaseOptions
 
     public string DevicesTable { get; set; } = "devices";
 
-    public string StorageBucket { get; set; } = "print-uploads";
+    public string StorageBucket { get; set; } = "print-files";
 }

@@ -21,7 +21,7 @@ public class DeviceAuthServiceTests
 
     private static (DeviceAuthService service, Mock<HttpMessageHandler> handlerMock, Mock<ICredentialProtector> protectorMock) CreateService(
         HttpResponseMessage responseMessage,
-        DeviceCredential? initialCredential = null)
+        AgentCredential? initialCredential = null)
     {
         var handlerMock = new Mock<HttpMessageHandler>();
         handlerMock
@@ -58,22 +58,31 @@ public class DeviceAuthServiceTests
         if (initialCredential != null)
         {
             service.LoadStoredCredentialAsync().GetAwaiter().GetResult();
+            protectorMock.Invocations.Clear();
         }
 
         return (service, handlerMock, protectorMock);
     }
 
     [Fact]
-    public async Task RefreshAccessToken_SendsBearerAnonKeyInAuthorizationHeader()
+    public async Task RefreshAccessToken_SendsBearerAgentTokenInAuthorizationHeader()
     {
         var response = new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent(JsonSerializer.Serialize(new { access_token = "jwt-token", expires_in = 900 }))
+            Content = new StringContent(JsonSerializer.Serialize(new
+            {
+                access_token = "valid-supabase-jwt-token-xyz",
+                expires_in = 900,
+                agent_token = "new-agent-token-999",
+                desktop_agent_id = "agent-1",
+                branch_id = "branch-1",
+                expires_at = DateTime.UtcNow.AddDays(90)
+            }))
         };
 
         var (service, handlerMock, _) = CreateService(
             response,
-            new DeviceCredential("dev-1", "shop-1", "secret-1", DateTime.UtcNow));
+            new AgentCredential("agent-1", "branch-1", "secret-1", DateTime.UtcNow));
 
         HttpRequestMessage? capturedRequest = null;
         handlerMock
@@ -87,11 +96,83 @@ public class DeviceAuthServiceTests
 
         var token = await service.RefreshAccessTokenAsync();
 
-        Assert.Equal("jwt-token", token);
+        Assert.Equal("valid-supabase-jwt-token-xyz", token);
         Assert.NotNull(capturedRequest);
         Assert.Equal("Bearer", capturedRequest.Headers.Authorization?.Scheme);
-        Assert.Equal("anon-key-12345", capturedRequest.Headers.Authorization?.Parameter);
+        Assert.Equal("secret-1", capturedRequest.Headers.Authorization?.Parameter);
         Assert.True(capturedRequest.Headers.Contains("apikey"));
+    }
+
+    [Fact]
+    public async Task ConfirmPairing_SendsCorrectTelemetryAndSavesCredential()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(new
+            {
+                desktop_agent_id = "agent-001",
+                branch_id = "branch-001",
+                agent_token = "new-raw-agent-token-xyz",
+                expires_at = DateTime.UtcNow.AddDays(90)
+            }))
+        };
+
+        var (service, handlerMock, _) = CreateService(response);
+
+        HttpRequestMessage? capturedRequest = null;
+        handlerMock
+            .Protected()
+            .Setup<Task<HttpResponseMessage>>(
+                "SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((req, _) => capturedRequest = req)
+            .ReturnsAsync(response);
+
+        var result = await service.ConfirmPairingAsync("123456");
+
+        Assert.NotNull(result);
+        Assert.Equal("agent-001", result.AgentId);
+        Assert.Equal("branch-001", result.BranchId);
+        Assert.Equal("new-raw-agent-token-xyz", result.AgentToken);
+        Assert.True(service.IsPaired);
+
+        Assert.NotNull(capturedRequest);
+        Assert.Contains("device-pairing-confirm", capturedRequest.RequestUri?.ToString());
+        var body = await capturedRequest.Content!.ReadAsStringAsync();
+        using var jsonDoc = JsonDocument.Parse(body);
+        Assert.Equal("123456", jsonDoc.RootElement.GetProperty("pairing_code").GetString());
+        Assert.Equal(Environment.MachineName, jsonDoc.RootElement.GetProperty("hostname").GetString());
+    }
+
+    [Fact]
+    public async Task UnpairAsync_SendsRevokeRequestAndClearsCredential()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(new { success = true }))
+        };
+
+        var (service, handlerMock, _) = CreateService(
+            response,
+            new AgentCredential("agent-001", "branch-001", "token-to-revoke", DateTime.UtcNow));
+
+        HttpRequestMessage? capturedRequest = null;
+        handlerMock
+            .Protected()
+            .Setup<Task<HttpResponseMessage>>(
+                "SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((req, _) => capturedRequest = req)
+            .ReturnsAsync(response);
+
+        Assert.True(service.IsPaired);
+        await service.UnpairAsync();
+
+        Assert.False(service.IsPaired);
+        Assert.NotNull(capturedRequest);
+        Assert.Contains("device-revoke", capturedRequest.RequestUri?.ToString());
     }
 
     [Fact]
@@ -105,7 +186,7 @@ public class DeviceAuthServiceTests
 
         var (service, _, _) = CreateService(
             response,
-            new DeviceCredential("dev-1", "shop-1", "secret-1", DateTime.UtcNow));
+            new AgentCredential("dev-1", "shop-1", "secret-1", DateTime.UtcNow));
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.RefreshAccessTokenAsync());
 
@@ -125,7 +206,7 @@ public class DeviceAuthServiceTests
 
         var (service, _, _) = CreateService(
             response,
-            new DeviceCredential("dev-1", "shop-1", "secret-1", DateTime.UtcNow));
+            new AgentCredential("dev-1", "shop-1", "secret-1", DateTime.UtcNow));
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.RefreshAccessTokenAsync());
 
@@ -145,11 +226,64 @@ public class DeviceAuthServiceTests
 
         var (service, _, _) = CreateService(
             response,
-            new DeviceCredential("dev-1", "shop-1", "secret-1", DateTime.UtcNow));
+            new AgentCredential("dev-1", "shop-1", "secret-1", DateTime.UtcNow));
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.RefreshAccessTokenAsync());
 
         Assert.Contains("Device credential revoked", ex.Message);
         Assert.False(service.IsPaired);
+    }
+
+    [Fact]
+    public async Task RefreshAccessToken_DoesNotRotateMachineToken_KeepsStoredCredential()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(new
+            {
+                access_token = "new-jwt-access-token-456",
+                expires_in = 900,
+                agent_token = "stable-original-machine-token",
+                desktop_agent_id = "agent-1",
+                branch_id = "branch-1",
+                expires_at = DateTime.UtcNow.AddDays(90)
+            }))
+        };
+
+        var initialCredential = new AgentCredential("agent-1", "branch-1", "stable-original-machine-token", DateTime.UtcNow);
+        var (service, _, protectorMock) = CreateService(response, initialCredential);
+
+        var token = await service.RefreshAccessTokenAsync();
+
+        Assert.Equal("new-jwt-access-token-456", token);
+        Assert.True(service.IsPaired);
+        Assert.Equal("stable-original-machine-token", service.CachedCredential?.AgentToken);
+        // Credential store save should NOT be invoked if machine token did not rotate
+        protectorMock.Verify(p => p.Protect(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void SupabaseOptions_StorageBucket_DefaultsToPrintFiles()
+    {
+        var options = new SmartPrinter.Agent.Configuration.SupabaseOptions();
+        Assert.Equal("print-files", options.StorageBucket);
+    }
+
+    [Fact]
+    public async Task RefreshAccessToken_OnTransient500Error_DoesNotUnpairDevice()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.InternalServerError)
+        {
+            Content = new StringContent("{\"error\":\"Internal server error\"}")
+        };
+
+        var (service, _, _) = CreateService(
+            response,
+            new AgentCredential("dev-1", "shop-1", "secret-1", DateTime.UtcNow));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.RefreshAccessTokenAsync());
+
+        Assert.Contains("Failed to refresh device token", ex.Message);
+        Assert.True(service.IsPaired);
     }
 }

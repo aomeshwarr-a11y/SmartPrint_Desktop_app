@@ -1,66 +1,179 @@
 // supabase/functions/device-revoke/index.ts
 //
-// Two callers use this:
-//   1. The desktop agent itself, on explicit "Unpair this computer" (best-effort - the
-//      agent deletes its local DPAPI credential regardless of whether this call
-//      succeeds).
-//   2. The owner dashboard/web app, to revoke a lost/stolen/retired shop PC - this path
-//      should go through a separate owner-authenticated function in a full
-//      implementation; this file focuses on the device-initiated self-revoke described
-//      in the blueprint's pairing flow.
+// Revokes a Desktop Agent and all its associated tokens.
+// Supported callers:
+//   1. Authenticated branch user (owner, manager, staff, platform admin) revoking from UI/dashboard.
+//      Strictly enforces that the user has authorization over the agent's branch. Cross-branch
+//      revocation is forbidden.
+//   2. Agent-initiated unpair using its own bearer token.
+//
+// Records a 'token_revoked' event in desktop_agent_events.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { handleCors, json } from "../_shared/cors.ts";
+import {
+  verifyUserSession,
+  verifyBranchAuthorization,
+  extractBearerToken,
+  authenticateAgentToken,
+} from "../_shared/auth.ts";
 
-Deno.serve(async (req: Request) => {
+const getEnv = (key: string): string => {
+  if (typeof Deno !== "undefined" && Deno.env) {
+    return Deno.env.get(key) || "";
+  }
+  return (typeof process !== "undefined" && process.env ? process.env[key] : "") || "";
+};
+
+export async function handleDeviceRevoke(req: Request): Promise<Response> {
+  const corsResponse = handleCors(req);
+  if (corsResponse) return corsResponse;
+
+  if (req.method !== "POST") {
+    return json({ error: "Method not allowed. Use POST." }, 405);
+  }
+
   try {
-    const body = await req.json().catch(() => null);
-    const deviceId = body?.device_id;
-    const deviceSecret = body?.device_secret;
-    if (!deviceId || !deviceSecret) {
-      return json({ error: "Missing device_id or device_secret." }, 400);
+    const supabaseUrl = getEnv("SUPABASE_URL");
+    const anonKey = getEnv("SUPABASE_ANON_KEY");
+    const serviceRoleKey = getEnv("SUPABASE_SERVICE_ROLE_KEY");
+
+    if (!supabaseUrl || !serviceRoleKey) {
+      return json({ error: "Server misconfiguration: missing Supabase credentials." }, 500);
     }
 
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const serviceClient = createClient(supabaseUrl, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    const serviceClient = createClient(supabaseUrl, serviceRoleKey);
 
-    const tokenHash = await sha256Hex(deviceSecret);
-    const { data: tokenRow } = await serviceClient
-      .from("device_tokens")
-      .select("id")
-      .eq("device_id", deviceId)
-      .eq("token_hash", tokenHash)
-      .maybeSingle();
+    const body = await req.json().catch(() => ({}));
+    const authHeader = req.headers.get("Authorization");
 
-    if (!tokenRow) {
-      // Do not leak whether the device_id exists - respond the same way either way.
-      return json({ revoked: true });
+    let agentIdToRevoke: string | null = null;
+    let revokedByUserId: string | null = null;
+    let revocationSource: "user" | "agent" = "agent";
+
+    // 1. Check if caller is an authenticated Supabase user (Dashboard / UI revocation)
+    if (authHeader) {
+      const callerClient = createClient(supabaseUrl, anonKey || serviceRoleKey, {
+        global: { headers: { Authorization: authHeader } },
+      });
+
+      const user = await verifyUserSession(callerClient);
+      if (user) {
+        revokedByUserId = user.id;
+        revocationSource = "user";
+
+        const requestedAgentId = typeof body?.desktop_agent_id === "string"
+          ? body.desktop_agent_id.trim()
+          : typeof body?.agent_id === "string"
+          ? body.agent_id.trim()
+          : null;
+
+        if (!requestedAgentId) {
+          return json({ error: "Missing desktop_agent_id in request body." }, 400);
+        }
+
+        // Fetch the target agent to inspect its branch
+        const { data: targetAgent, error: agentError } = await serviceClient
+          .from("desktop_agents")
+          .select("id, branch_id, status")
+          .eq("id", requestedAgentId)
+          .maybeSingle();
+
+        if (agentError || !targetAgent) {
+          return json({ error: "Desktop agent not found." }, 404);
+        }
+
+        // Verify user has authorization over this agent's branch
+        const isAuthorized = await verifyBranchAuthorization(
+          serviceClient,
+          callerClient,
+          user.id,
+          targetAgent.branch_id
+        );
+
+        if (!isAuthorized) {
+          return json({ error: "Forbidden: You are not authorized to revoke agents for this branch." }, 403);
+        }
+
+        agentIdToRevoke = targetAgent.id;
+      }
     }
 
-    await serviceClient.from("device_tokens").update({ revoked_at: new Date().toISOString() }).eq("id", tokenRow.id);
-    await serviceClient.from("devices").update({ status: "revoked" }).eq("id", deviceId);
-    await serviceClient.from("device_events").insert({ device_id: deviceId, event_type: "revoked" });
-    await serviceClient.from("audit_logs").insert({
-      actor_type: "device",
-      actor_id: deviceId,
-      action: "device_revoked",
+    // 2. If not authenticated as a user, check for agent bearer token (Agent self-unpair)
+    if (!agentIdToRevoke) {
+      const rawToken = extractBearerToken(req, body);
+      if (!rawToken) {
+        return json({ error: "Authentication required. Provide user session or agent bearer token." }, 401);
+      }
+
+      const agentAuth = await authenticateAgentToken(serviceClient, rawToken);
+      if (!agentAuth) {
+        // Do not leak existence of token; respond cleanly
+        return json({ error: "Invalid, expired, or revoked agent token." }, 401);
+      }
+
+      agentIdToRevoke = agentAuth.agent.id;
+      revocationSource = "agent";
+    }
+
+    const nowIso = new Date().toISOString();
+
+    // 3. Revoke all active tokens for this desktop agent
+    await serviceClient
+      .from("desktop_agent_tokens")
+      .update({ revoked_at: nowIso })
+      .eq("desktop_agent_id", agentIdToRevoke)
+      .is("revoked_at", null);
+
+    // 4. Mark desktop agent status as revoked
+    const updatePayload: Record<string, any> = {
+      status: "revoked",
+      revoked_at: nowIso,
+    };
+    if (revokedByUserId) {
+      updatePayload.revoked_by = revokedByUserId;
+    }
+
+    const { error: updateAgentError } = await serviceClient
+      .from("desktop_agents")
+      .update(updatePayload)
+      .eq("id", agentIdToRevoke);
+
+    if (updateAgentError) {
+      console.error("Failed to update desktop agent revocation state:", updateAgentError);
+      return json({ error: "Database error during agent revocation." }, 500);
+    }
+
+    // 5. Unlink any printers previously assigned to this agent (set desktop_agent_id = NULL)
+    await serviceClient
+      .from("printers")
+      .update({ desktop_agent_id: null })
+      .eq("desktop_agent_id", agentIdToRevoke);
+
+    // 6. Record 'token_revoked' audit lifecycle event
+    await serviceClient.from("desktop_agent_events").insert({
+      desktop_agent_id: agentIdToRevoke,
+      event_type: "token_revoked",
+      detail: {
+        revoked_by: revokedByUserId,
+        actor: revocationSource,
+        revoked_at: nowIso,
+      },
     });
 
-    return json({ revoked: true });
-  } catch (err) {
-    console.error("device-revoke error", err);
-    return json({ error: "Internal error." }, 500);
-  }
-});
+    console.log(`Desktop agent ${agentIdToRevoke} revoked by ${revocationSource}`);
 
-async function sha256Hex(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+    return json({
+      revoked: true,
+      desktop_agent_id: agentIdToRevoke,
+    });
+  } catch (err) {
+    console.error("Unexpected error in device-revoke:", err);
+    return json({ error: "Internal server error." }, 500);
+  }
 }
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+// Serve with Deno if in Deno runtime
+if (typeof Deno !== "undefined" && Deno.serve) {
+  Deno.serve(handleDeviceRevoke);
 }

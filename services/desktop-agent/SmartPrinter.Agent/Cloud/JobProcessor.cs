@@ -257,11 +257,7 @@ public sealed class JobProcessor
 
     private async Task<string> RequestSignedUrlAsync(PrintJobRecord job, CancellationToken cancellationToken)
     {
-        var client = await _gateway.GetClientAsync();
-        var signed = await client.Storage
-            .From("print-uploads")
-            .CreateSignedUrl(job.StoragePath, 600);
-        return signed;
+        return await _gateway.CreateSignedUrlAsync(job.StoragePath, 600);
     }
 
     private static PrintOptions ParseOptions(string json)

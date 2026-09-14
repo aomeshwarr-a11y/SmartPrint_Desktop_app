@@ -47,7 +47,7 @@ public sealed class SecretRedactionEnricher : ILogEventEnricher
     private static readonly System.Text.RegularExpressions.Regex[] Patterns =
     {
         new(@"Bearer\s+[A-Za-z0-9\-_\.]+", System.Text.RegularExpressions.RegexOptions.Compiled),
-        new(@"(?i)(device_secret|access_token|password|api_key|apikey)\s*[:=]\s*""?[^""\s,}]+", System.Text.RegularExpressions.RegexOptions.Compiled)
+        new(@"(?i)(device_secret|agent_token|access_token|password|api_key|apikey)\s*[:=]\s*""?[^""\s,}]+", System.Text.RegularExpressions.RegexOptions.Compiled)
     };
 
     public void Enrich(LogEvent logEvent, ILogEventPropertyFactory propertyFactory)

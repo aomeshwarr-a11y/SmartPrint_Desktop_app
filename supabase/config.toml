@@ -1,2 +1,19 @@
+project_id = "vabjcmkziudkqjwyzils"
+
+[functions.desktop-signup]
+verify_jwt = false
+
+[functions.device-pairing-create]
+verify_jwt = false
+
 [functions.device-pairing-confirm]
+verify_jwt = false
+
+[functions.device-token-refresh]
+verify_jwt = false
+
+[functions.device-revoke]
+verify_jwt = false
+
+[functions.printer-link]
 verify_jwt = false

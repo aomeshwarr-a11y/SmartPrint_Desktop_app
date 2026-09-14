@@ -8,12 +8,23 @@ import {
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabaseClient";
 
+interface SignUpOptions {
+  fullName?: string;
+  role?: "shop_owner";
+  signupSource?: "desktop";
+}
+
 interface AuthContextValue {
   session: Session | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string) => Promise<void>;
+  signUp: (
+    email: string,
+    password: string,
+    options?: SignUpOptions
+  ) => Promise<void>;
   signOut: () => Promise<void>;
+  ensureDesktopUserRole: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -103,6 +114,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  async function ensureDesktopUserRole(): Promise<void> {
+    // Desktop registrations are assigned 'shop_owner' exclusively via the
+    // server-controlled desktop-signup Edge Function.
+    // Client-side self-promotion and metadata-based inspection are strictly disabled.
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      await supabase
+        .from("user_roles")
+        .select("role, branch_id")
+        .eq("user_id", user.id);
+    } catch {
+      // Non-blocking verification
+    }
+  }
+
   async function signIn(email: string, password: string) {
     const normalizedEmail = email.trim().toLowerCase();
 
@@ -114,37 +144,57 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) {
       throw error;
     }
+
+    await ensureDesktopUserRole();
   }
 
-  async function signUp(email: string, password: string) {
+  async function signUp(
+    email: string,
+    password: string,
+    options?: SignUpOptions
+  ) {
     const normalizedEmail = email.trim().toLowerCase();
 
-    const { data, error } = await supabase.auth.signUp({
+    // 1. Invoke the secure server-controlled desktop-signup Edge Function.
+    // Server enforces the 'shop_owner' role using service_role credentials and refuses
+    // to trust or accept client-supplied role or metadata boundaries.
+    const { data, error } = await supabase.functions.invoke("desktop-signup", {
+      body: {
+        email: normalizedEmail,
+        password,
+        full_name: options?.fullName?.trim() ?? "",
+      },
+    });
+
+    if (error) {
+      let errorMsg = error.message || "Could not create account.";
+      if ((error as any).context && typeof (error as any).context.json === "function") {
+        try {
+          const parsed = await (error as any).context.json();
+          if (parsed?.error) {
+            errorMsg = parsed.error;
+          }
+        } catch {
+          // ignore parse error
+        }
+      }
+      throw new Error(errorMsg);
+    }
+
+    if (data?.error) {
+      throw new Error(data.error);
+    }
+
+    // 2. Establish authenticated session via standard sign-in
+    const { error: signInError } = await supabase.auth.signInWithPassword({
       email: normalizedEmail,
       password,
     });
 
-    if (error) {
-      throw error;
-    }
-
-    /*
-     * Supabase may intentionally return no error when the email
-     * already belongs to an existing confirmed account.
-     *
-     * An empty identities array indicates that this is not a
-     * newly-created identity.
-     */
-    if (data.user && data.user.identities?.length === 0) {
-      throw new Error(
-        "An account with this email already exists. Please log in."
-      );
-    }
-
-    if (!data.user) {
-      throw new Error(
-        "Could not create account. Please try again."
-      );
+    if (signInError) {
+      console.warn("Account created with shop_owner role, but auto-login did not complete:", signInError);
+    } else {
+      await ensureDesktopUserRole();
     }
   }
 
@@ -164,6 +214,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signIn,
         signUp,
         signOut,
+        ensureDesktopUserRole,
       }}
     >
       {children}

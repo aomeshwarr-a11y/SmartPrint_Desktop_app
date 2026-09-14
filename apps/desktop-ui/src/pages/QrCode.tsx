@@ -19,26 +19,47 @@ export default function QrCode() {
       }
 
       try {
-        const { data, error } = await supabase
-          .from("shops")
-          .select("name, slug")
-          .eq("owner_user_id", session.user.id)
+        let branchData: { id: string; name: string | null } | null = null;
+
+        // 1. Check branches where user is owner or manager
+        const { data: ownedBranch } = await supabase
+          .from("branches")
+          .select("id, name")
+          .or(`owner_id.eq.${session.user.id},manager_id.eq.${session.user.id}`)
+          .limit(1)
           .maybeSingle();
 
-        if (error) {
-          console.error("Error loading shop details:", error);
-          return;
+        if (ownedBranch) {
+          branchData = ownedBranch;
+        } else {
+          // 2. Check user_roles table for branch membership
+          const { data: roleRow } = await supabase
+            .from("user_roles")
+            .select("branch_id, branches(id, name)")
+            .eq("user_id", session.user.id)
+            .in("role", ["branch", "branch_owner", "shop_owner"])
+            .limit(1)
+            .maybeSingle();
+
+          if (roleRow) {
+            const b = (roleRow as any)?.branches;
+            if (b?.id) {
+              branchData = { id: b.id, name: b.name ?? null };
+            } else if (roleRow.branch_id) {
+              branchData = { id: roleRow.branch_id, name: null };
+            }
+          }
         }
 
-        if (data?.slug) {
-          // This is the actual customer-facing URL encoded into the QR.
-          const publicUrl = `https://smartprinter.in/s/${data.slug}`;
+        if (branchData?.id) {
+          // Customer URL encoded into the QR resolves by branch ID
+          const publicUrl = `https://smartprinter.in/s/${branchData.id}`;
 
           setShopUrl(publicUrl);
-          setShopName(data.name ?? "");
+          setShopName(branchData.name ?? "");
         }
       } catch (err) {
-        console.error("Unexpected error fetching shop QR:", err);
+        console.error("Unexpected error fetching branch QR:", err);
       } finally {
         setLoading(false);
       }
@@ -73,7 +94,7 @@ export default function QrCode() {
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-2 text-xs font-medium text-slate-500 mb-1">
-              <span>Supabase: shops table</span>
+              <span>Supabase: branches table</span>
               <span>/</span>
               <span className="font-mono">QrCode.tsx</span>
 
@@ -81,7 +102,7 @@ export default function QrCode() {
                 <>
                   <span>/</span>
                   <span className="font-mono text-emerald-700">
-                    slug: {shopUrl.split("/").pop()}
+                    id: {shopUrl.split("/").pop()}
                   </span>
                 </>
               )}

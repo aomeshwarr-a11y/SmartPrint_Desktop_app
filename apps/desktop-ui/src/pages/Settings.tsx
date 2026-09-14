@@ -107,23 +107,48 @@ export default function Settings() {
   }, [serviceStatus]);
 
   useEffect(() => {
-    async function loadShop() {
+    async function loadBranch() {
       if (!session) return;
-      const { data } = await supabase
-        .from("shops")
-        .select("id, name, slug")
-        .eq("owner_user_id", session.user.id)
-        .maybeSingle();
+      try {
+        // 1. Check branches where user is owner or manager
+        const { data: ownedBranch } = await supabase
+          .from("branches")
+          .select("id, name")
+          .or(`owner_id.eq.${session.user.id},manager_id.eq.${session.user.id}`)
+          .limit(1)
+          .maybeSingle();
 
-      if (data) {
-        setShopId(data.id);
-        setSettings((prev) => ({
-          ...prev,
-          shopMoniker: data.name || data.slug || prev.shopMoniker,
-        }));
+        if (ownedBranch) {
+          setShopId(ownedBranch.id);
+          setSettings((prev) => ({
+            ...prev,
+            shopMoniker: ownedBranch.name || prev.shopMoniker,
+          }));
+          return;
+        }
+
+        // 2. Check user_roles table for branch membership
+        const { data: roleRow } = await supabase
+          .from("user_roles")
+          .select("branch_id, branches(id, name)")
+          .eq("user_id", session.user.id)
+          .in("role", ["branch", "branch_owner", "shop_owner"])
+          .limit(1)
+          .maybeSingle();
+
+        if (roleRow?.branch_id) {
+          setShopId(roleRow.branch_id);
+          const b = (roleRow as any)?.branches;
+          setSettings((prev) => ({
+            ...prev,
+            shopMoniker: b?.name || prev.shopMoniker,
+          }));
+        }
+      } catch (err) {
+        console.warn("Could not load branch details for settings:", err);
       }
     }
-    void loadShop();
+    void loadBranch();
   }, [session]);
 
   const handleSaveSettings = async () => {

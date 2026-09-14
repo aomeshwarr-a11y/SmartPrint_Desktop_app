@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./context/AuthContext";
 import { supabase } from "./lib/supabaseClient";
+import { getServiceStatus } from "./lib/ipc";
 
 import Layout from "./components/Layout";
 
@@ -72,7 +73,7 @@ type OnboardingState =
 
 
 function useOnboardingState() {
-  const { session, loading: authLoading } = useAuth();
+  const { session, loading: authLoading, ensureDesktopUserRole } = useAuth();
 
   const [state, setState] = useState<OnboardingState>("loading");
 
@@ -97,21 +98,40 @@ function useOnboardingState() {
       }
 
       try {
+        // Ensure the desktop user has the shop_owner role assigned idempotently
+        await ensureDesktopUserRole().catch(() => {});
+
         /*
          * ------------------------------------------------------
-         * STEP 1: Check whether the user has created a shop.
+         * STEP 1: Determine whether the user has a branch or is an admin.
          * ------------------------------------------------------
          */
-        const { data: shop, error: shopError } = await supabase
-          .from("shops")
+        const user = session.user;
+        let activeBranchId: string | null = null;
+
+        // Determine whether user is a platform admin using existing application mechanism
+        let isAdmin = false;
+        try {
+          const { data: adminRpc } = await supabase.rpc("is_admin");
+          if (adminRpc === true) {
+            isAdmin = true;
+          }
+        } catch {
+          // RPC may fail if unauthenticated or network error, fallback to false
+        }
+
+        // 1. Check branches where user is owner or manager
+        const { data: ownedBranch, error: branchError } = await supabase
+          .from("branches")
           .select("id")
-          .eq("owner_user_id", session.user.id)
+          .or(`owner_id.eq.${user.id},manager_id.eq.${user.id}`)
+          .limit(1)
           .maybeSingle();
 
-        if (shopError) {
+        if (branchError) {
           console.error(
-            "Failed to check SmartPrinter shop onboarding:",
-            shopError
+            "Failed to check SmartPrinter branch onboarding:",
+            branchError
           );
 
           if (!cancelled) {
@@ -121,11 +141,54 @@ function useOnboardingState() {
           return;
         }
 
+        if (ownedBranch?.id) {
+          activeBranchId = ownedBranch.id;
+        } else {
+          // 2. Check user_roles table for branch membership
+          const { data: roleRow, error: roleError } = await supabase
+            .from("user_roles")
+            .select("branch_id")
+            .eq("user_id", user.id)
+            .in("role", ["branch", "branch_owner", "shop_owner"])
+            .limit(1)
+            .maybeSingle();
+
+          if (roleError) {
+            console.error(
+              "Failed to check SmartPrinter user roles:",
+              roleError
+            );
+
+            if (!cancelled) {
+              setState("error");
+            }
+
+            return;
+          }
+
+          if (roleRow?.branch_id) {
+            activeBranchId = roleRow.branch_id;
+          }
+        }
+
+        // 3. If admin has no direct branch or role assignment, allow access to first branch
+        if (!activeBranchId && isAdmin) {
+          const { data: adminBranch } = await supabase
+            .from("branches")
+            .select("id")
+            .limit(1)
+            .maybeSingle();
+
+          if (adminBranch?.id) {
+            activeBranchId = adminBranch.id;
+          }
+        }
+
         /*
-         * No shop means this is a new user who has not
-         * completed Shop Setup yet.
+         * No branch found means this is a new user who has not
+         * completed Branch/Shop Setup yet.
          */
-        if (!shop) {
+        if (!activeBranchId) {
           if (!cancelled) {
             setState("shop_setup");
           }
@@ -135,44 +198,44 @@ function useOnboardingState() {
 
         /*
          * ------------------------------------------------------
-         * STEP 2: Check whether the shop has an active device.
+         * STEP 2: Check whether this station has an active desktop agent.
          * ------------------------------------------------------
-         *
-         * The schema defines devices.status as:
-         *
-         * pending
-         * active
-         * revoked
-         *
-         * "active" is therefore the completed pairing state.
+         * First, check local desktop agent via IPC (fast & authoritative for this machine).
          */
-        const { data: activeDevice, error: deviceError } = await supabase
-          .from("devices")
-          .select("id")
-          .eq("shop_id", shop.id)
-          .eq("status", "active")
-          .limit(1)
-          .maybeSingle();
-
-        if (deviceError) {
-          console.error(
-            "Failed to check SmartPrinter device onboarding:",
-            deviceError
-          );
-
+        const localStatus = await getServiceStatus().catch(() => null);
+        if (localStatus?.isPaired) {
           if (!cancelled) {
-            setState("error");
+            setState("complete");
           }
-
           return;
         }
 
         /*
-         * Shop exists, but no active device exists.
+         * Check cloud desktop_agents (new Desktop Agent architecture) for this branch.
+         */
+        let hasActiveAgent = false;
+        try {
+          const { data: activeAgent } = await supabase
+            .from("desktop_agents")
+            .select("id")
+            .eq("branch_id", activeBranchId)
+            .eq("status", "active")
+            .limit(1)
+            .maybeSingle();
+
+          if (activeAgent?.id) {
+            hasActiveAgent = true;
+          }
+        } catch {
+          // Non-blocking fallback
+        }
+
+        /*
+         * Branch exists, but no active agent exists.
          *
          * Send the user to Device Pairing.
          */
-        if (!activeDevice) {
+        if (!hasActiveAgent) {
           if (!cancelled) {
             setState("device_pairing");
           }

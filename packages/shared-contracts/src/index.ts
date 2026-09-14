@@ -63,6 +63,8 @@ export interface PrinterInfo {
   supportsColor: boolean;
   supportsDuplex: boolean;
   fingerprint: string;
+  connectionType?: "USB" | "Bluetooth" | "Network (Wi-Fi / LAN)" | "Virtual" | "Windows Printer" | string;
+  isAuthorized?: boolean;
 }
 
 export type LocalJobStatus =
@@ -96,7 +98,10 @@ export interface PrintJobRecord {
 
 export interface ServiceStatusDto {
   isPaired: boolean;
+  agentId?: string;
+  branchId?: string;
   deviceId?: string;
+  shopId?: string;
   realtimeConnected: boolean;
   mockCloudMode: boolean;
   agentVersion: string;
@@ -115,12 +120,15 @@ export interface UpdateSettingsRequest {
 }
 
 export interface PairDeviceCreateRequest {
-  ownerAccessToken: string;
+  ownerAccessToken?: string;
+  branchId?: string;
 }
 
 export interface PairDeviceCreateResponse {
   pairingCode: string;
   expiresAt: string;
+  requestId?: string;
+  branchId?: string;
 }
 
 export interface PairDeviceConfirmRequest {
@@ -128,8 +136,10 @@ export interface PairDeviceConfirmRequest {
 }
 
 export interface PairDeviceConfirmResponse {
-  deviceId: string;
-  shopId: string;
+  agentId?: string;
+  branchId?: string;
+  deviceId?: string;
+  shopId?: string;
 }
 
 export interface PrintTestPageRequest {

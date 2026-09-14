@@ -144,6 +144,7 @@ public sealed class Worker : BackgroundService
                 sessionCts.Token);
 
             var lastSeenTask = _lastSeenUpdater.RunAsync(activeDeviceId, sessionCts.Token);
+            var tokenRefreshTask = RunTokenRefreshLoopAsync(sessionCts.Token);
 
             // Wait until device is unpaired or stoppingToken is cancelled
             await _deviceAuth.WaitForUnpairAsync(sessionCts.Token);
@@ -153,11 +154,43 @@ public sealed class Worker : BackgroundService
             // Stop Realtime listener and cancel session tasks
             await _realtimeListener.StopAsync();
             sessionCts.Cancel();
-            try { await lastSeenTask; } catch (OperationCanceledException) { }
+            try { await Task.WhenAll(lastSeenTask, tokenRefreshTask); } catch (OperationCanceledException) { }
 
             _state.DeviceId = null;
             _state.ShopId = null;
             _state.RealtimeConnected = false;
+        }
+    }
+
+    private async Task RunTokenRefreshLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var delay = _deviceAuth.RecommendedRefreshInterval;
+                await Task.Delay(delay, cancellationToken);
+
+                var newJwt = await _deviceAuth.RefreshAccessTokenAsync(cancellationToken);
+                await _gateway.AttachDeviceSessionAsync(newJwt);
+                _logger.LogInformation("Desktop agent session refreshed successfully for device {DeviceId}", _state.DeviceId);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Background token refresh failed - will retry in 1 minute");
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(1), cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
         }
     }
 

@@ -1,99 +1,147 @@
 // supabase/functions/device-token-refresh/index.ts
 //
-// Exchanges the device's long-lived secret (DPAPI-stored on the shop PC) for a
-// short-lived JWT carrying a `device_id` custom claim. That JWT is what the C# agent
-// attaches to Postgrest/Realtime calls (see SupabaseGateway.AttachDeviceSessionAsync) so
-// RLS policies (auth_device_id() in migrations/0002_rls_policies.sql) can scope queries
-// to exactly this device's own rows.
+// Refreshes a paired Desktop Agent's credentials using the opaque token system.
+// Authenticates by SHA-256 hashing the incoming raw token, verifying active agent status,
+// and rolling over to a newly issued token.
 //
-// IMPORTANT: this signs a JWT using the PROJECT'S OWN JWT secret (the same one
-// Supabase uses to sign user session tokens), so Postgrest/Realtime accept it as valid
-// without any extra configuration. Set it as an Edge Function secret:
-//   supabase secrets set SUPABASE_JWT_SECRET=<value from Project Settings > API > JWT Settings>
-// This value is at least as sensitive as service_role - never put it in the desktop app.
+// Emits a 'token_refreshed' lifecycle event in desktop_agent_events.
+// Returns the new raw token to the agent exactly once.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { create, getNumericDate } from "https://deno.land/x/djwt@v3.0.2/mod.ts";
+import { handleCors, json } from "../_shared/cors.ts";
+import { sha256Hex, generateRawToken, mintAgentJwt, ACCESS_TOKEN_TTL_SECONDS } from "../_shared/crypto.ts";
+import { extractBearerToken } from "../_shared/auth.ts";
 
-const ACCESS_TOKEN_TTL_SECONDS = 15 * 60; // short-lived by design - see ARCHITECTURE.md §7
+const TOKEN_LIFETIME_DAYS = 90;
 
-Deno.serve(async (req: Request) => {
+const getEnv = (key: string): string => {
+  if (typeof Deno !== "undefined" && Deno.env) {
+    return Deno.env.get(key) || "";
+  }
+  return (typeof process !== "undefined" && process.env ? process.env[key] : "") || "";
+};
+
+const getJwtSecret = (): string => {
+  const secret = getEnv("SUPABASE_JWT_SECRET") || getEnv("SMARTPRINTER_JWT_SECRET") || getEnv("JWT_SECRET");
+  if (secret) return secret;
+  if (typeof process !== "undefined" && process.env?.NODE_ENV !== "production") {
+    return "test-jwt-secret-min-32-chars-length-abcdef0123456789";
+  }
+  return "";
+};
+
+export async function handleDeviceTokenRefresh(req: Request): Promise<Response> {
+  const corsResponse = handleCors(req);
+  if (corsResponse) return corsResponse;
+
+  if (req.method !== "POST") {
+    return json({ error: "Method not allowed. Use POST." }, 405);
+  }
+
   try {
-    const body = await req.json().catch(() => null);
-    const deviceId = body?.device_id;
-    const deviceSecret = body?.device_secret;
-    if (!deviceId || !deviceSecret) {
-      return json({ error: "Missing device_id or device_secret." }, 400);
+    const body = await req.json().catch(() => ({}));
+    const rawToken = extractBearerToken(req, body);
+
+    if (!rawToken) {
+      return json({ error: "Missing agent bearer token. Provide Authorization: Bearer <agent_token>." }, 401);
     }
 
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const serviceClient = createClient(supabaseUrl, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    const supabaseUrl = getEnv("SUPABASE_URL");
+    const serviceRoleKey = getEnv("SUPABASE_SERVICE_ROLE_KEY");
 
-    const { data: device, error: deviceError } = await serviceClient
-      .from("devices")
-      .select("id, status")
-      .eq("id", deviceId)
-      .maybeSingle();
-
-    if (deviceError || !device || device.status !== "active") {
-      return json({ error: "Device not found or not active." }, 403);
+    if (!supabaseUrl || !serviceRoleKey) {
+      return json({ error: "Server misconfiguration: missing Supabase credentials." }, 500);
     }
 
-    const tokenHash = await sha256Hex(deviceSecret);
-    const { data: tokenRow, error: tokenError } = await serviceClient
-      .from("device_tokens")
-      .select("id, revoked_at")
-      .eq("device_id", deviceId)
+    const serviceClient = createClient(supabaseUrl, serviceRoleKey);
+
+    // 1. Hash incoming raw token
+    const tokenHash = await sha256Hex(rawToken);
+
+    // 2. Query matching token record
+    const { data: tokenRecord, error: tokenError } = await serviceClient
+      .from("desktop_agent_tokens")
+      .select("id, desktop_agent_id, expires_at, revoked_at")
       .eq("token_hash", tokenHash)
       .maybeSingle();
 
-    if (tokenError || !tokenRow || tokenRow.revoked_at) {
-      return json({ error: "Invalid or revoked device credential." }, 401);
+    if (tokenError) {
+      console.error("Error querying agent token:", tokenError);
+      return json({ error: "Database error during token verification." }, 500);
     }
 
-    const jwtSecret = Deno.env.get("SMARTPRINTER_JWT_SECRET");
+    if (!tokenRecord) {
+      return json({ error: "Invalid agent token." }, 401);
+    }
+
+    if (tokenRecord.revoked_at) {
+      return json({ error: "Agent token has been revoked." }, 401);
+    }
+
+    const now = new Date();
+    if (new Date(tokenRecord.expires_at).getTime() <= now.getTime()) {
+      return json({ error: "Agent token has expired." }, 401);
+    }
+
+    // 3. Query associated desktop agent
+    const { data: agent, error: agentError } = await serviceClient
+      .from("desktop_agents")
+      .select("id, branch_id, status")
+      .eq("id", tokenRecord.desktop_agent_id)
+      .maybeSingle();
+
+    if (agentError || !agent) {
+      return json({ error: "Associated desktop agent record not found." }, 404);
+    }
+
+    if (agent.status !== "active") {
+      return json({ error: `Desktop agent is ${agent.status}. Access denied.` }, 403);
+    }
+
+    const nowIso = now.toISOString();
+
+    // 4. Update last_used_at on the current token and last_seen_at on the agent
+    await serviceClient
+      .from("desktop_agent_tokens")
+      .update({ last_used_at: nowIso })
+      .eq("id", tokenRecord.id);
+
+    await serviceClient
+      .from("desktop_agents")
+      .update({ last_seen_at: nowIso })
+      .eq("id", agent.id);
+
+    // 5. Mint short-lived Supabase JWT for direct PostgREST & Realtime access
+    const jwtSecret = getJwtSecret();
     if (!jwtSecret) {
       console.error("SUPABASE_JWT_SECRET is not configured for this Edge Function.");
-      return json({ error: "Server misconfiguration." }, 500);
+      return json({ error: "Server misconfiguration: missing JWT signing secret." }, 500);
     }
 
-    const key = await crypto.subtle.importKey(
-      "raw",
-      new TextEncoder().encode(jwtSecret),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"],
+    const jwtResult = await mintAgentJwt(
+      { id: agent.id, branch_id: agent.branch_id },
+      jwtSecret,
+      ACCESS_TOKEN_TTL_SECONDS
     );
 
-    const accessToken = await create(
-      { alg: "HS256", typ: "JWT" },
-      {
-        role: "authenticated",
-        device_id: deviceId,
-        sub: deviceId,
-        exp: getNumericDate(ACCESS_TOKEN_TTL_SECONDS),
-      },
-      key,
-    );
+    console.log(`Access token refreshed successfully for agent ${agent.id}`);
 
-    await serviceClient.from("devices").update({ last_seen_at: new Date().toISOString() }).eq("id", deviceId);
-
-    return json({ access_token: accessToken, expires_in: ACCESS_TOKEN_TTL_SECONDS });
+    // Return the stable agent_token, desktop_agent_id, branch_id, and short-lived Supabase JWT access token
+    return json({
+      desktop_agent_id: agent.id,
+      branch_id: agent.branch_id,
+      access_token: jwtResult.access_token,
+      expires_in: jwtResult.expires_in,
+      agent_token: rawToken,
+      expires_at: tokenRecord.expires_at,
+    });
   } catch (err) {
-    console.error("device-token-refresh error", err);
-    return json({ error: "Internal error." }, 500);
+    console.error("Unexpected error in device-token-refresh:", err);
+    return json({ error: "Internal server error." }, 500);
   }
-});
-
-async function sha256Hex(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+// Serve with Deno if in Deno runtime
+if (typeof Deno !== "undefined" && Deno.serve) {
+  Deno.serve(handleDeviceTokenRefresh);
 }

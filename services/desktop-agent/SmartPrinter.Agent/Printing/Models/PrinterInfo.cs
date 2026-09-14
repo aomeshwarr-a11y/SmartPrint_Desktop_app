@@ -37,6 +37,10 @@ public sealed record PrinterInfo
     /// (e.g. after a driver reinstall renamed the port). See ARCHITECTURE.md ("printer mapping drift").
     /// </summary>
     public string Fingerprint => $"{DriverName}|{PortName}";
+
+    public string ConnectionType { get; init; } = "Windows Printer";
+
+    public bool IsAuthorized { get; init; }
 }
 
 public sealed record PrintOptions

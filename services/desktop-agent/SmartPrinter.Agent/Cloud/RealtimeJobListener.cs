@@ -143,24 +143,28 @@ public sealed class RealtimeJobListener : IAsyncDisposable
 
                 var client = await _gateway.GetClientAsync();
 
+                // Ensure Realtime client has the latest valid Supabase JWT session token attached
+                if (!string.IsNullOrEmpty(_gateway.CurrentAccessToken))
+                {
+                    client.Realtime.SetAuth(_gateway.CurrentAccessToken);
+                }
+
                 // Dispose the previous channel before creating a new one.
                 UnsubscribeChannel();
 
-                _channel = client.Realtime.Channel($"print_jobs_device_{deviceId}");
+                _channel = client.Realtime.Channel($"print_jobs_agent_{deviceId}");
 
                 _channel.Register(
-    new PostgresChangesOptions(
-        "public",
-        "print_jobs",
-        PostgresChangesOptions.ListenType.Inserts,
-        $"device_id=eq.{deviceId}"));
+                    new PostgresChangesOptions(
+                        "public",
+                        "print_jobs",
+                        PostgresChangesOptions.ListenType.Inserts));
 
-_channel.Register(
-    new PostgresChangesOptions(
-        "public",
-        "print_jobs",
-        PostgresChangesOptions.ListenType.Updates,
-        $"device_id=eq.{deviceId}"));
+                _channel.Register(
+                    new PostgresChangesOptions(
+                        "public",
+                        "print_jobs",
+                        PostgresChangesOptions.ListenType.Updates));
 
 _channel.AddPostgresChangeHandler(
     PostgresChangesOptions.ListenType.Inserts,

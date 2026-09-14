@@ -10,7 +10,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const SIGNED_URL_TTL_SECONDS = 600; // short expiry - see ARCHITECTURE.md §7
-const STORAGE_BUCKET = "print-uploads";
+const STORAGE_BUCKET = "print-files";
 
 Deno.serve(async (req: Request) => {
   try {

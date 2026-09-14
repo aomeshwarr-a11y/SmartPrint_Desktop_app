@@ -82,8 +82,9 @@ public sealed class IpcRouter
         var queued = await _queue.GetJobsByStatusAsync(new[] { LocalJobStatus.Queued, LocalJobStatus.Claimed, LocalJobStatus.Downloading, LocalJobStatus.Printing }, cancellationToken);
         return new ServiceStatusDto
         {
-            IsPaired = _state.DeviceId.HasValue,
-            DeviceId = _state.DeviceId?.ToString(),
+            IsPaired = _state.AgentId.HasValue,
+            AgentId = _state.AgentId?.ToString(),
+            BranchId = _state.BranchId?.ToString(),
             RealtimeConnected = _state.RealtimeConnected,
             MockCloudMode = _state.MockCloudMode,
             AgentVersion = typeof(IpcRouter).Assembly.GetName().Version?.ToString() ?? "0.0.0",
@@ -95,18 +96,22 @@ public sealed class IpcRouter
     {
         var printers = await _printerService.DiscoverPrintersAsync(cancellationToken);
         var cache = await _queue.GetCachedPrintersAsync(cancellationToken);
+        var enriched = new List<PrinterInfo>(printers.Count);
         foreach (var p in printers)
         {
+            var isAuth = cache.FirstOrDefault(c => string.Equals(c.PrinterName, p.Name, StringComparison.OrdinalIgnoreCase))?.IsAuthorized ?? false;
             await _queue.UpsertPrinterCacheAsync(new Data.Models.PrinterCacheRecord
             {
                 PrinterName = p.Name,
                 DriverName = p.DriverName,
                 PortName = p.PortName,
                 Fingerprint = p.Fingerprint,
-                IsAuthorized = cache.FirstOrDefault(c => c.PrinterName == p.Name)?.IsAuthorized ?? false
+                IsAuthorized = isAuth
             }, cancellationToken);
+
+            enriched.Add(p with { IsAuthorized = isAuth });
         }
-        return printers;
+        return enriched;
     }
 
     private async Task<object> AuthorizePrinterAsync(IpcRequest request, CancellationToken cancellationToken)
@@ -168,9 +173,15 @@ public sealed class IpcRouter
         var payload = Deserialize<PairDeviceConfirmRequest>(request.Payload)
                       ?? throw new InvalidOperationException("Missing payload for PairDeviceConfirm.");
         var result = await _deviceAuth.ConfirmPairingAsync(payload.PairingCode, cancellationToken);
-        _state.DeviceId = Guid.Parse(result.DeviceId);
-        _state.ShopId = Guid.Parse(result.ShopId);
-        return new { deviceId = result.DeviceId, shopId = result.ShopId };
+        _state.AgentId = Guid.Parse(result.AgentId);
+        _state.BranchId = Guid.Parse(result.BranchId);
+        return new
+        {
+            agentId = result.AgentId,
+            branchId = result.BranchId,
+            deviceId = result.AgentId,
+            shopId = result.BranchId
+        };
     }
 
     private async Task<object> UnpairDeviceAsync(CancellationToken cancellationToken)
@@ -185,11 +196,11 @@ public sealed class IpcRouter
         }
 
         await _deviceAuth.UnpairAsync(cancellationToken);
-        _state.DeviceId = null;
-        _state.ShopId = null;
+        _state.AgentId = null;
+        _state.BranchId = null;
         _state.RealtimeConnected = false;
 
-        _logger.LogInformation("Device unpaired - Realtime stopped, credentials cleared, waiting for re-pairing");
+        _logger.LogInformation("Desktop agent unpaired - Realtime stopped, credentials cleared, waiting for re-pairing");
         return new { unpaired = true };
     }
 

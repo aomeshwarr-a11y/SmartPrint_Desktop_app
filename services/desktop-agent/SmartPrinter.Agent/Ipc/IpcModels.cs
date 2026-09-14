@@ -59,7 +59,22 @@ public sealed class IpcResponse
 public sealed class ServiceStatusDto
 {
     public bool IsPaired { get; set; }
-    public string? DeviceId { get; set; }
+    public string? AgentId { get; set; }
+    public string? BranchId { get; set; }
+
+    // Backward-compatible aliases for desktop UI
+    public string? DeviceId
+    {
+        get => AgentId;
+        set => AgentId = value;
+    }
+
+    public string? ShopId
+    {
+        get => BranchId;
+        set => BranchId = value;
+    }
+
     public bool RealtimeConnected { get; set; }
     public bool MockCloudMode { get; set; }
     public string AgentVersion { get; set; } = string.Empty;

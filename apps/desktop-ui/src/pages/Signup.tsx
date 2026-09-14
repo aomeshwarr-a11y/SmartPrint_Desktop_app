@@ -1,4 +1,4 @@
-import React, { useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 
@@ -42,7 +42,11 @@ export default function Signup() {
     setSubmitting(true);
 
     try {
-      await signUp(email, password);
+      await signUp(email, password, {
+        fullName,
+        role: "shop_owner",
+        signupSource: "desktop",
+      });
       setDone(true);
     } catch (err) {
       setError(

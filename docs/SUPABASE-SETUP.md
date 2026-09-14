@@ -29,10 +29,10 @@ This applies, in order:
 ## 3. Create the Storage bucket
 
 ```bash
-supabase storage buckets create print-uploads --private
+supabase storage buckets create print-files --private
 ```
 
-(Or via the dashboard: Storage -> New bucket -> name `print-uploads`, **not public**.)
+(Or via the dashboard: Storage -> New bucket -> name `print-files`.)
 
 ## 4. Deploy Edge Functions
 

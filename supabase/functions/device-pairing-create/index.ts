@@ -1,92 +1,150 @@
 // supabase/functions/device-pairing-create/index.ts
 //
-// Called by the desktop agent (forwarding the OWNER's Supabase Auth access token, never
-// stored by the agent) to start pairing this computer to the owner's shop. Requires the
-// caller to be an authenticated shop owner - this is the security boundary that makes
-// pairing safe: only someone who can already log in as the shop owner can mint a pairing
-// code for that shop.
+// Called by an authenticated branch user (owner, manager, staff, or platform admin)
+// to generate a short-lived, single-use 6-digit pairing code for connecting a Windows Desktop Agent.
 //
-// Deploy: supabase functions deploy device-pairing-create
-// Required secrets (supabase secrets set ...): none beyond the project's own
-// SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY, which Supabase injects automatically for
-// Edge Functions - never hardcode them here.
+// Security boundary: Only authenticated users with authorization over the target branch can create
+// pairing requests. Tokens are never created here — only a short-lived pairing request.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { handleCors, json } from "../_shared/cors.ts";
+import { generatePairingCode } from "../_shared/crypto.ts";
+import {
+  verifyUserSession,
+  verifyBranchAuthorization,
+  resolveUserBranch,
+  isPlatformAdmin,
+} from "../_shared/auth.ts";
 
 const PAIRING_CODE_EXPIRY_MINUTES = 10;
+const MAX_COLLISION_RETRIES = 5;
 
-Deno.serve(async (req: Request) => {
+const getEnv = (key: string): string => {
+  if (typeof Deno !== "undefined" && Deno.env) {
+    return Deno.env.get(key) || "";
+  }
+  return (typeof process !== "undefined" && process.env ? process.env[key] : "") || "";
+};
+
+export async function handleDevicePairingCreate(req: Request): Promise<Response> {
+  const corsResponse = handleCors(req);
+  if (corsResponse) return corsResponse;
+
+  if (req.method !== "POST") {
+    return json({ error: "Method not allowed. Use POST." }, 405);
+  }
+
   try {
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) {
-      return json({ error: "Missing Authorization header - owner must be logged in." }, 401);
+      return json({ error: "Missing Authorization header. Authentication required." }, 401);
     }
 
-    // Client bound to the CALLER's own JWT, so `auth.uid()` / RLS resolve to the owner -
-    // we deliberately do NOT use the service_role client to look up the shop, so a bug
-    // here can never accidentally return someone else's shop_id.
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
-    const callerClient = createClient(supabaseUrl, anonKey, {
+    const supabaseUrl = getEnv("SUPABASE_URL");
+    const anonKey = getEnv("SUPABASE_ANON_KEY");
+    const serviceRoleKey = getEnv("SUPABASE_SERVICE_ROLE_KEY");
+
+    if (!supabaseUrl || !serviceRoleKey) {
+      return json({ error: "Server misconfiguration: missing Supabase environment variables." }, 500);
+    }
+
+    // Client bound to caller's JWT to evaluate user identity
+    const callerClient = createClient(supabaseUrl, anonKey || serviceRoleKey, {
       global: { headers: { Authorization: authHeader } },
     });
 
-    const { data: userData, error: userError } = await callerClient.auth.getUser();
-    if (userError || !userData.user) {
-      return json({ error: "Invalid or expired owner session." }, 401);
+    const user = await verifyUserSession(callerClient);
+    if (!user) {
+      return json({ error: "Invalid or expired session. Please sign in again." }, 401);
     }
 
-    const { data: shop, error: shopError } = await callerClient
-      .from("shops")
-      .select("id")
-      .eq("owner_user_id", userData.user.id)
-      .maybeSingle();
+    const serviceClient = createClient(supabaseUrl, serviceRoleKey);
 
-    if (shopError || !shop) {
-      return json({ error: "No shop found for this account. Finish shop setup first." }, 400);
+    const body = await req.json().catch(() => ({}));
+    let targetBranchId: string | null = typeof body?.branch_id === "string" ? body.branch_id.trim() : null;
+
+    if (targetBranchId) {
+      // Validate UUID format
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidRegex.test(targetBranchId)) {
+        return json({ error: "Invalid branch_id format. Must be a valid UUID." }, 400);
+      }
+
+      const isAuthorized = await verifyBranchAuthorization(
+        serviceClient,
+        callerClient,
+        user.id,
+        targetBranchId
+      );
+
+      if (!isAuthorized) {
+        return json({ error: "You are not authorized to create pairing codes for this branch." }, 403);
+      }
+    } else {
+      // Resolve caller's branch if none was provided
+      targetBranchId = await resolveUserBranch(serviceClient, user.id);
+
+      if (!targetBranchId) {
+        // If user is a platform admin without an assigned branch, require explicit branch_id
+        if (await isPlatformAdmin(callerClient)) {
+          return json({ error: "Platform admin must supply branch_id explicitly." }, 400);
+        }
+        return json({ error: "No authorized branch found for your account. Please specify branch_id or complete branch setup." }, 400);
+      }
     }
 
-    const pairingCode = generatePairingCode();
     const expiresAt = new Date(Date.now() + PAIRING_CODE_EXPIRY_MINUTES * 60_000).toISOString();
 
-    // Writing the pairing request itself needs elevated privileges (the table has no
-    // client RLS policy at all - see migrations/0003) so we use the service_role client
-    // ONLY for this one insert, never to look up which shop the caller owns.
-    const serviceClient = createClient(supabaseUrl, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-    const { error: insertError } = await serviceClient.from("device_pairing_requests").insert({
-      shop_id: shop.id,
-      pairing_code: pairingCode,
-      expires_at: expiresAt,
-    });
+    // Insert pairing request with collision retry loop
+    let createdRecord: { id: string; pairing_code: string; expires_at: string; branch_id: string } | null = null;
 
-    if (insertError) {
-      console.error("Failed to create pairing request", insertError);
-      return json({ error: "Could not create pairing request." }, 500);
+    for (let attempt = 0; attempt < MAX_COLLISION_RETRIES; attempt++) {
+      const code = generatePairingCode(6);
+
+      const { data, error } = await serviceClient
+        .from("desktop_agent_pairing_requests")
+        .insert({
+          branch_id: targetBranchId,
+          pairing_code: code,
+          created_by: user.id,
+          expires_at: expiresAt,
+        })
+        .select("id, pairing_code, expires_at, branch_id")
+        .maybeSingle();
+
+      if (!error && data) {
+        createdRecord = data;
+        break;
+      }
+
+      // Postgres unique constraint violation code is 23505
+      if (error && error.code === "23505") {
+        continue;
+      }
+
+      console.error("Failed to insert pairing request:", error);
+      return json({ error: "Could not create pairing request in database." }, 500);
     }
 
-    await serviceClient.from("audit_logs").insert({
-      actor_type: "owner",
-      actor_id: userData.user.id,
-      action: "device_pairing_requested",
-      target: shop.id,
+    if (!createdRecord) {
+      console.error("Pairing code collision limit exceeded.");
+      return json({ error: "Could not generate a unique pairing code. Please try again." }, 500);
+    }
+
+    // Return only the exact fields required by frontend
+    return json({
+      request_id: createdRecord.id,
+      pairing_code: createdRecord.pairing_code,
+      expires_at: createdRecord.expires_at,
+      branch_id: createdRecord.branch_id,
     });
-
-    return json({ pairing_code: pairingCode, expires_at: expiresAt });
   } catch (err) {
-    console.error("device-pairing-create error", err);
-    return json({ error: "Internal error." }, 500);
+    console.error("Unexpected error in device-pairing-create:", err);
+    return json({ error: "Internal server error." }, 500);
   }
-});
-
-function generatePairingCode(): string {
-  // 6-digit numeric code - easy to read aloud/type, short expiry limits brute force risk.
-  const n = crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000;
-  return n.toString().padStart(6, "0");
 }
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+// Serve with Deno if in Deno runtime
+if (typeof Deno !== "undefined" && Deno.serve) {
+  Deno.serve(handleDevicePairingCreate);
 }
