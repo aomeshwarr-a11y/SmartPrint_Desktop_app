@@ -104,11 +104,10 @@ export default function ShopSetup() {
           error: roleError,
         } = await supabase
           .from("user_roles")
-          .select(
-            "branch_id, branches(id, name, location)"
-          )
+          .select("branch_id")
           .eq("user_id", session.user.id)
           .in("role", ["branch", "branch_owner", "shop_owner"])
+          .not("branch_id", "is", null)
           .limit(1)
           .maybeSingle();
 
@@ -120,18 +119,29 @@ export default function ShopSetup() {
         }
 
         if (roleRow?.branch_id && mounted) {
-          setExistingBranchId(roleRow.branch_id);
+          const branchId = roleRow.branch_id;
 
-          const branch = Array.isArray(roleRow.branches)
-            ? roleRow.branches[0]
-            : roleRow.branches;
+          const {
+            data: roleBranch,
+            error: roleBranchError,
+          } = await supabase
+            .from("branches")
+            .select("id, name, location")
+            .eq("id", branchId)
+            .maybeSingle();
 
-          if (branch) {
-            setShopName(branch.name ?? "");
-            setShopAddress(branch.location ?? "");
+          if (roleBranchError) {
+            console.warn(
+              "Branch details lookup failed:",
+              roleBranchError
+            );
+          } else if (roleBranch) {
+            setExistingBranchId(roleBranch.id);
+            setShopName(roleBranch.name ?? "");
+            setShopAddress(roleBranch.location ?? "");
 
-            // UI-only slug.
-            setSlug(createSlug(branch.name ?? ""));
+            // UI-only slug because branches.slug does not exist in production.
+            setSlug(createSlug(roleBranch.name ?? ""));
           }
         }
       } catch (error) {
