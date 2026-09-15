@@ -281,19 +281,39 @@ export default function PrinterAuthorization() {
           }
         } else if (!printerId && branchId) {
           try {
-            const { data: newP } = await supabase
+            const { data: newP, error: insertError } = await supabase
               .from("printers")
               .insert({
                 branch_id: branchId,
                 name: printerName,
-                status: "ready",
+                status: "online",
+                incident_status: "available",
                 is_active: true,
                 desktop_agent_id: currentAgentId ?? null,
               })
               .select("id")
-              .maybeSingle();
+              .single();
 
-            if (newP?.id) printerId = newP.id;
+            if (insertError) {
+              console.error("Failed to insert printer into Supabase:", {
+                message: insertError.message,
+                details: insertError.details,
+                hint: insertError.hint,
+                code: insertError.code,
+                branchId,
+                printerName,
+                desktopAgentId: currentAgentId ?? null,
+              });
+              throw new Error(
+                `Printer could not be added to cloud database: ${insertError.message}`
+              );
+            }
+
+            if (!newP?.id) {
+              throw new Error("Printer was inserted but no printer ID was returned.");
+            }
+
+            printerId = newP.id;
           } catch (insErr) {
             console.warn("Cloud printer insert warning:", insErr);
           }
@@ -304,7 +324,7 @@ export default function PrinterAuthorization() {
           const nextTaken = Math.min(slotsTotal, currentlyAuthorizedCount + 1);
           await supabase
             .from("branches")
-            .update({ slots_taken: nextTaken, updated_at: new Date().toISOString() })
+            .update({ slots_taken: nextTaken })
             .eq("id", branchId);
 
           setBranchQuota((prev) =>
@@ -337,7 +357,7 @@ export default function PrinterAuthorization() {
           const nextTaken = Math.max(0, currentlyAuthorizedCount - 1);
           await supabase
             .from("branches")
-            .update({ slots_taken: nextTaken, updated_at: new Date().toISOString() })
+            .update({ slots_taken: nextTaken })
             .eq("id", branchId);
 
           setBranchQuota((prev) =>

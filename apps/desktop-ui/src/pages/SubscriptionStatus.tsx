@@ -195,7 +195,7 @@ export default function SubscriptionStatus() {
   const handleOpenBillingOnWebsite = async (targetSlots?: number) => {
     if (!branch?.id) return;
 
-    let targetUrl = `https://smartprinter.in/pricing?branch_id=${encodeURIComponent(branch.id)}`;
+    let targetUrl = `https://smartprinter.in/checkout?${branch.id}`;
     if (targetSlots) {
       targetUrl += `&plan_slots=${targetSlots}`;
     }

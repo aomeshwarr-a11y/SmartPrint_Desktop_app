@@ -341,21 +341,39 @@ export default function PrinterDiscovery() {
           } else if (!printerId) {
             // Printer not in cloud yet; create it
             try {
-              const { data: newP } = await supabase
+              const { data: newP, error: insertError } = await supabase
                 .from("printers")
                 .insert({
                   branch_id: activeBranchId,
                   name: printerName,
-                  status: "ready",
+                  status: "online",
+                  incident_status: "available",
                   is_active: true,
                   desktop_agent_id: currentAgentId ?? null,
                 })
                 .select("id")
-                .maybeSingle();
+                .single();
 
-              if (newP?.id) {
-                printerId = newP.id;
+              if (insertError) {
+                console.error("[PrinterDiscovery] Failed to insert printer:", {
+                  message: insertError.message,
+                  details: insertError.details,
+                  hint: insertError.hint,
+                  code: insertError.code,
+                  branchId: activeBranchId,
+                  printerName,
+                  desktopAgentId: currentAgentId ?? null,
+                });
+                throw new Error(
+                  `Printer could not be added to cloud database: ${insertError.message}`
+                );
               }
+
+              if (!newP?.id) {
+                throw new Error("Printer was not created in the cloud database.");
+              }
+
+              printerId = newP.id;
             } catch (insErr) {
               console.warn("[PrinterDiscovery] Could not insert new cloud printer:", insErr);
             }
@@ -365,7 +383,7 @@ export default function PrinterDiscovery() {
           const nextTaken = Math.min(slotsTotal, slotsTaken + 1);
           await supabase
             .from("branches")
-            .update({ slots_taken: nextTaken, updated_at: new Date().toISOString() })
+            .update({ slots_taken: nextTaken })
             .eq("id", activeBranchId);
 
           setBranchQuota((prev) =>
@@ -396,7 +414,7 @@ export default function PrinterDiscovery() {
           const nextTaken = Math.max(0, slotsTaken - 1);
           await supabase
             .from("branches")
-            .update({ slots_taken: nextTaken, updated_at: new Date().toISOString() })
+            .update({ slots_taken: nextTaken })
             .eq("id", activeBranchId);
 
           setBranchQuota((prev) =>
